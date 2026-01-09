@@ -35,6 +35,15 @@ typedef int (WSAAPI *WSAIoctl_t)(SOCKET, DWORD, LPVOID, DWORD, LPVOID, DWORD, LP
 typedef BOOL (WSAAPI *WSAGetOverlappedResult_t)(SOCKET, LPWSAOVERLAPPED, LPDWORD, BOOL, LPDWORD);
 typedef BOOL (WINAPI *GetQueuedCompletionStatus_t)(HANDLE, LPDWORD, PULONG_PTR, LPOVERLAPPED*, DWORD);
 typedef BOOL (WINAPI *CreateProcessW_t)(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
+// GetQueuedCompletionStatusEx 函数指针类型 - 用于批量获取 IOCP 事件（现代高性能应用必需）
+typedef BOOL (WINAPI *GetQueuedCompletionStatusEx_t)(
+    HANDLE CompletionPort,
+    LPOVERLAPPED_ENTRY lpCompletionPortEntries,
+    ULONG ulCount,
+    PULONG ulNumEntriesRemoved,
+    DWORD dwMilliseconds,
+    BOOL fAlertable
+);
 
 // ============= 原始函数指针 =============
 connect_t fpConnect = NULL;
@@ -52,6 +61,7 @@ WSAGetOverlappedResult_t fpWSAGetOverlappedResult = NULL;
 GetQueuedCompletionStatus_t fpGetQueuedCompletionStatus = NULL;
 LPFN_CONNECTEX fpConnectEx = NULL;
 CreateProcessW_t fpCreateProcessW = NULL;
+GetQueuedCompletionStatusEx_t fpGetQueuedCompletionStatusEx = NULL; // 批量 IOCP 事件获取
 
 // ============= 辅助函数 =============
 
@@ -699,6 +709,46 @@ BOOL WINAPI DetourGetQueuedCompletionStatus(
     return result;
 }
 
+// GetQueuedCompletionStatusEx Hook - 批量获取 IOCP 事件
+// 现代高性能应用（Chromium/Rust/Go）使用此 API 提高吞吐量，
+// 如果不 Hook 此函数，ConnectEx 完成后的代理握手将被跳过
+BOOL WINAPI DetourGetQueuedCompletionStatusEx(
+    HANDLE CompletionPort,
+    LPOVERLAPPED_ENTRY lpCompletionPortEntries,
+    ULONG ulCount,
+    PULONG ulNumEntriesRemoved,
+    DWORD dwMilliseconds,
+    BOOL fAlertable
+) {
+    if (!fpGetQueuedCompletionStatusEx) {
+        SetLastError(ERROR_INVALID_FUNCTION);
+        return FALSE;
+    }
+    
+    // 调用原始函数获取批量 IOCP 事件
+    BOOL result = fpGetQueuedCompletionStatusEx(
+        CompletionPort, lpCompletionPortEntries, ulCount,
+        ulNumEntriesRemoved, dwMilliseconds, fAlertable
+    );
+    
+    if (result && ulNumEntriesRemoved && *ulNumEntriesRemoved > 0) {
+        // 遍历所有完成的事件，检查是否有待处理的 ConnectEx 上下文
+        for (ULONG i = 0; i < *ulNumEntriesRemoved; i++) {
+            LPOVERLAPPED ovl = lpCompletionPortEntries[i].lpOverlapped;
+            if (ovl) {
+                // 尝试处理 ConnectEx 完成握手
+                // 如果不是我们跟踪的 Overlapped，HandleConnectExCompletion 会直接返回 true
+                if (!HandleConnectExCompletion(ovl)) {
+                    // 握手失败，记录日志供调试
+                    Core::Logger::Error("GetQueuedCompletionStatusEx: ConnectEx 握手失败");
+                }
+            }
+        }
+    }
+    
+    return result;
+}
+
 // ============= Phase 2: CreateProcessW Hook =============
 
 BOOL WINAPI DetourCreateProcessW(
@@ -909,6 +959,12 @@ namespace Hooks {
         if (MH_CreateHookApi(L"kernel32.dll", "GetQueuedCompletionStatus",
                              (LPVOID)DetourGetQueuedCompletionStatus, (LPVOID*)&fpGetQueuedCompletionStatus) != MH_OK) {
             Core::Logger::Error("Hook GetQueuedCompletionStatus 失败");
+        }
+        
+        // Hook GetQueuedCompletionStatusEx (批量 IOCP - Chromium/Rust/Go 等现代应用必需)
+        if (MH_CreateHookApi(L"kernel32.dll", "GetQueuedCompletionStatusEx",
+                             (LPVOID)DetourGetQueuedCompletionStatusEx, (LPVOID*)&fpGetQueuedCompletionStatusEx) != MH_OK) {
+            Core::Logger::Error("Hook GetQueuedCompletionStatusEx 失败");
         }
         
         // ===== Phase 3: 流量监控 Hooks =====
