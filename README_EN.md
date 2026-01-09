@@ -614,6 +614,29 @@ If this project helps you, feel free to:
 
 ---
 
+## 🔍 Pseudocode Source Note / 伪代码（pseudocode_dll）来源说明
+
+The `pseudocode_dll/` directory in this repository contains pseudocode obtained by decompiling a **DLL published in a forum post** (Binary Ninja / IDA Hex-Rays output). Its purposes are solely:
+
+- To investigate the **intermittent Antigravity crashes** I encountered on **Windows 11**.
+- To study/compare its Hook and forced proxy implementation approach.
+- As a research record (for future reference).
+
+> ⚠️ Important Disclaimer
+> - `pseudocode_dll/` is **NOT involved** in the build or release of this project; it is merely a record of learning and research.
+> - The current code of this project is a version **implemented from scratch and continuously maintained** by me, NOT "open sourcing the original DLL".
+> - This repository **does NOT distribute** the finished DLL from the original post; please visit the original thread to obtain the original DLL.
+> - If the original author believes that analyzing/publishing this pseudocode is inappropriate and wishes for its removal, please file an Issue, and I will cooperate immediately (move to a separate branch/remove/rewrite description).
+
+**Source (Original Post containing DLL):**
+https://linux.do/t/topic/1189424
+
+**Pseudocode Files in this Repo:**
+- `pseudocode_dll/BinaryNinja.txt` (Binary Ninja Decompilation Output)
+- `pseudocode_dll/Hex-Rays.txt` (IDA Hex-Rays Decompilation Output)
+
+---
+
 <p align="center">
   <sub>Made with ❤️ by 煎饼果子（86）</sub>
 </p>

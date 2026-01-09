@@ -69,6 +69,7 @@
 
 ---
 
+
 ## ⚠️ 环境要求 / Prerequisites
 
 > 在使用本工具前，请确保系统已安装必要的运行库，否则可能无法正常启动目标程序。
@@ -627,6 +628,29 @@ MinHook 部分版权归 **Tsuda Kageyu** 所有。
     </td>
   </tr>
 </table>
+
+---
+
+## 🔍 伪代码（pseudocode_dll）来源说明 / Pseudocode Source Note
+
+本仓库的 `pseudocode_dll/` 目录收录了**对某论坛帖中发布的 DLL**进行反编译得到的伪代码（Binary Ninja / IDA Hex-Rays 输出），用途仅为：
+
+- 排查我在 **Windows 11** 环境下遇到的 **Antigravity 间歇性崩溃**问题
+- 学习/对照其 Hook 与强制代理的实现思路
+- 作为研究记录留档（便于后续回溯）
+
+> ⚠️ 重要声明  
+> - `pseudocode_dll/` **不参与**本项目的构建与发布，只是学习与研究记录。  
+> - 本项目当前代码为我**从零实现与持续维护**的版本，并非“原 DLL 的源码开源”。  
+> - 本仓库**不分发**原帖中的成品 DLL；如需获取原始 DLL，请前往原帖。  
+> - 若原帖作者认为该伪代码公开不合适、希望移除相关内容，请在仓库提 Issue，我会第一时间配合调整（移动到单独分支/移除/重写说明均可）。
+
+**来源（原帖含 DLL）：**  
+https://linux.do/t/topic/1189424
+
+**本仓库伪代码文件：**
+- `pseudocode_dll/BinaryNinja.txt`（Binary Ninja 反编译输出）
+- `pseudocode_dll/Hex-Rays.txt`（IDA Hex-Rays 反编译输出）
 
 ---
 
