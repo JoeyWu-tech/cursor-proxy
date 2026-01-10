@@ -496,9 +496,22 @@ target_link_libraries(version PRIVATE ws2_32)
 
 ### 验证是否生效 / Verification
 
-1. **检查日志**: 查看目标程序目录下是否生成 `proxy.log`
+1. **检查日志**: 查看是否生成日志文件（格式：`proxy-YYYYMMDD.log`）
 2. **查看代理软件**: 观察代理软件的连接日志
 3. **使用抓包工具**: 使用 Wireshark 确认流量走向
+
+#### 📂 日志文件位置 / Log File Locations
+
+日志文件按以下优先级存放：
+
+| 优先级 | 位置 | 说明 |
+|--------|------|------|
+| 1️⃣ | `<DLL所在目录>\logs\` | 与 `version.dll` 同级的 `logs` 子目录 |
+| 2️⃣ | `%TEMP%\antigravity-proxy-logs\` | 系统临时目录（通常为 `C:\Users\<用户名>\AppData\Local\Temp\antigravity-proxy-logs\`） |
+
+> 💡 **提示**：如果在 DLL 目录无法创建 `logs` 文件夹（例如权限不足），日志会自动回退到系统 TEMP 目录。
+>
+> 快速打开 TEMP 目录：按 `Win+R`，输入 `%TEMP%`，回车即可。
 
 ---
 
