@@ -397,6 +397,41 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
 ## 日志文件
 DLL 运行时会在当前目录生成 `proxy.log` 日志文件，用于调试。
 
+## WSL 环境说明
+
+> ⚠️ **重要提示**：Antigravity-Proxy (version.dll 劫持方案) **无法代理 WSL 内部的流量**。
+
+这是由技术架构决定的根本性限制：
+- DLL 注入只能 Hook Windows PE 进程
+- WSL2 运行真正的 Linux 内核，使用 Linux socket() 系统调用
+- 即使注入 wsl.exe，也无法 Hook WSL 内部的 language_server_linux_x64
+
+### WSL 替代方案
+
+**方案一：使用 antissh 工具（推荐）**
+```bash
+# 在 WSL 中执行
+curl -O https://raw.githubusercontent.com/ccpopy/antissh/main/antissh.sh
+chmod +x antissh.sh && bash ./antissh.sh
+```
+项目地址：https://github.com/ccpopy/antissh
+
+**方案二：WSL Mirrored 网络模式**
+1. 创建 %USERPROFILE%\.wslconfig 文件，内容如下：
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+2. 执行 `wsl --shutdown` 重启 WSL
+3. 在 WSL 中设置环境变量：
+```bash
+export ALL_PROXY=socks5://127.0.0.1:7890
+```
+要求：Windows 11 22H2+，WSL 2.0+
+
+**方案三：TUN 模式全局代理**
+在 Clash/Mihomo 中开启 TUN 模式，实现全局透明代理。
+
 ## 常见问题
 
 ### Q: DLL 加载失败？
@@ -407,6 +442,9 @@ A: 检查代理服务器是否正常运行，且端口配置正确。
 
 ### Q: 如何验证 DLL 是否生效？
 A: 检查目标程序目录是否生成 `proxy.log` 文件。
+
+### Q: WSL 中的程序不走代理？
+A: 这是技术限制，请参考上述"WSL 环境说明"使用替代方案。
 
 ## 编译信息
 - 编译时间: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
