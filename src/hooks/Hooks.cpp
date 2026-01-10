@@ -23,6 +23,7 @@
 // ============= 函数指针类型定义 =============
 typedef int (WSAAPI *connect_t)(SOCKET, const struct sockaddr*, int);
 typedef int (WSAAPI *WSAConnect_t)(SOCKET, const struct sockaddr*, int, LPWSABUF, LPWSABUF, LPQOS, LPQOS);
+typedef struct hostent* (WSAAPI *gethostbyname_t)(const char* name);
 typedef int (WSAAPI *getaddrinfo_t)(PCSTR, PCSTR, const ADDRINFOA*, PADDRINFOA*);
 typedef int (WSAAPI *getaddrinfoW_t)(PCWSTR, PCWSTR, const ADDRINFOW*, PADDRINFOW*);
 typedef int (WSAAPI *send_t)(SOCKET, const char*, int, int);
@@ -48,6 +49,7 @@ typedef BOOL (WINAPI *GetQueuedCompletionStatusEx_t)(
 // ============= 原始函数指针 =============
 connect_t fpConnect = NULL;
 WSAConnect_t fpWSAConnect = NULL;
+gethostbyname_t fpGetHostByName = NULL;
 getaddrinfo_t fpGetAddrInfo = NULL;
 getaddrinfoW_t fpGetAddrInfoW = NULL;
 send_t fpSend = NULL;
@@ -485,6 +487,24 @@ int WSAAPI DetourGetAddrInfoW(PCWSTR pNodeName, PCWSTR pServiceName,
     }
 
     return fpGetAddrInfoW(pNodeName, pServiceName, pHints, ppResult);
+}
+
+struct hostent* WSAAPI DetourGetHostByName(const char* name) {
+    auto& config = Core::Config::Instance();
+    if (!fpGetHostByName) return NULL;
+
+    if (name && config.fakeIp.enabled) {
+        std::string node = name;
+        if (!node.empty() && !IsLoopbackHost(node) && !IsIpLiteralHost(node)) {
+            Core::Logger::Info("拦截到域名解析(gethostbyname): " + node);
+            uint32_t fakeIp = Network::FakeIP::Instance().Alloc(node);
+            if (fakeIp != 0) {
+                std::string fakeIpStr = Network::FakeIP::IpToString(fakeIp);
+                return fpGetHostByName(fakeIpStr.c_str());
+            }
+        }
+    }
+    return fpGetHostByName(name);
 }
 
 BOOL WSAAPI DetourWSAConnectByNameA(
@@ -999,6 +1019,12 @@ namespace Hooks {
         if (MH_CreateHookApi(L"ws2_32.dll", "WSAConnectByNameW", 
                              (LPVOID)DetourWSAConnectByNameW, (LPVOID*)&fpWSAConnectByNameW) != MH_OK) {
             Core::Logger::Error("Hook WSAConnectByNameW 失败");
+        }
+        
+        // Hook gethostbyname
+        if (MH_CreateHookApi(L"ws2_32.dll", "gethostbyname", 
+                             (LPVOID)DetourGetHostByName, (LPVOID*)&fpGetHostByName) != MH_OK) {
+            Core::Logger::Error("Hook gethostbyname 失败");
         }
         
         // Hook WSAIoctl (用于捕获 ConnectEx)

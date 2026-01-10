@@ -16,8 +16,8 @@ namespace Core {
 
     struct FakeIPConfig {
         bool enabled = true;
-        std::string cidr = "10.0.0.0/8";
-        int max_entries = 0; // 最大缓存条目数，0 表示不限制
+        std::string cidr = "198.18.0.0/15";
+        // 注：max_entries 已废弃，Ring Buffer 策略下自动循环复用地址池
     };
 
     struct TimeoutConfig {
@@ -169,9 +169,8 @@ namespace Core {
                 if (j.contains("fake_ip")) {
                     auto& fip = j["fake_ip"];
                     fakeIp.enabled = fip.value("enabled", true);
-                    fakeIp.cidr = fip.value("cidr", "10.0.0.0/8");
-                    int maxEntries = fip.value("max_entries", 0);
-                    fakeIp.max_entries = maxEntries < 0 ? 0 : maxEntries;
+                    fakeIp.cidr = fip.value("cidr", "198.18.0.0/15");
+                    // max_entries 已废弃，Ring Buffer 策略下无需配置上限
                 }
 
                 if (j.contains("timeout")) {

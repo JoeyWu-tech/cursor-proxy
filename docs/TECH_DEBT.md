@@ -7,12 +7,11 @@
 
 ## 🔴 高严重程度 (High Priority)
 
-### TD-001: FakeIP 映射表无限增长
-- **文件**: `src/network/FakeIP.hpp:34-49`
-- **问题**: `m_ipToDomain` 和 `m_domainToIp` 只增不删
-- **触发**: 持续解析新域名的长运行进程
-- **影响**: 内存持续增长，可能 OOM
-- **修复**: 添加 LRU 淘汰或条目上限 (建议 10000)
+### ~~TD-001: FakeIP 映射表无限增长~~ ✅ 已修复
+- **文件**: `src/network/FakeIP.hpp`
+- **问题**: ~~`m_ipToDomain` 和 `m_domainToIp` 只增不删~~
+- **状态**: **已通过 Ring Buffer 策略修复** (2026-01-11)
+- **修复说明**: 使用循环复用的地址池策略，游标回绕时自动覆盖旧映射并清理反向索引
 
 ### TD-002: ConnectEx 异步上下文泄漏
 - **文件**: `src/hooks/Hooks.cpp:77,212-224`

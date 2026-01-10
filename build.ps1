@@ -258,7 +258,7 @@ $configJson = @{
     }
     fake_ip = @{
         enabled = $true
-        cidr = "10.0.0.0/8"
+        cidr = "198.18.0.0/15"
     }
     timeout = @{
         connect = 5000
@@ -312,7 +312,7 @@ Antigravity-Proxy 是一个基于 MinHook 的 Windows DLL 代理注入工具。
     },
     "fake_ip": {
         "enabled": true,           // 是否启用 FakeIP 系统 (拦截 DNS 解析)
-        "cidr": "10.0.0.0/8"       // FakeIP 分配的虚拟 IP 地址范围
+        "cidr": "198.18.0.0/15"       // FakeIP 分配的虚拟 IP 地址范围 (默认为基准测试保留网段)
     },
     "timeout": {
         "connect": 5000,           // 连接超时 (毫秒)
@@ -363,7 +363,7 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
 | proxy.port | 代理服务器端口 | 7890 |
 | proxy.type | 代理类型 (socks5/http) | socks5 |
 | fake_ip.enabled | 是否启用 FakeIP 系统 | true |
-| fake_ip.cidr | 虚拟 IP 地址范围 | 10.0.0.0/8 |
+| fake_ip.cidr | 虚拟 IP 地址范围 | 198.18.0.0/15 |
 | timeout.connect | 连接超时 (毫秒) | 5000 |
 | timeout.send | 发送超时 (毫秒) | 5000 |
 | timeout.recv | 接收超时 (毫秒) | 5000 |

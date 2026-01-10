@@ -277,12 +277,12 @@ setx ANTIGRAVITY_HOME "%LOCALAPPDATA%\Programs\Antigravity"
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 3. DNS 拦截 (DNS Interception)                                           │
-│    getaddrinfo("example.com") → 分配 FakeIP (10.0.0.x) → 记录映射       │
+│    getaddrinfo("example.com") → 分配 FakeIP (198.18.x.x) → 记录映射       │
 └─────────────────────────────────────────────────────────────────────────┘
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 4. 连接重定向 (Connection Redirect)                                       │
-│    connect(10.0.0.x) → 查询映射还原域名 → 连接代理 → SOCKS5 握手         │
+│    connect(198.18.x.x) → 查询映射还原域名 → 连接代理 → SOCKS5 握手         │
 └─────────────────────────────────────────────────────────────────────────┘
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -453,7 +453,7 @@ target_link_libraries(version PRIVATE ws2_32)
     },
     "fake_ip": {
         "enabled": true,
-        "cidr": "10.0.0.0/8"
+        "cidr": "198.18.0.0/15"
     },
     "timeout": {
         "connect": 5000,
@@ -490,7 +490,7 @@ target_link_libraries(version PRIVATE ws2_32)
 | `proxy.port` | int | `7890` | 代理服务器端口 |
 | `proxy.type` | string | `"socks5"` | 代理类型: `socks5` 或 `http` |
 | `fake_ip.enabled` | bool | `true` | 是否启用 FakeIP 系统 |
-| `fake_ip.cidr` | string | `"10.0.0.0/8"` | FakeIP 地址范围 |
+| `fake_ip.cidr` | string | `"198.18.0.0/15"` | FakeIP 地址范围 (基准测试保留网段) |
 | `timeout.connect` | int | `5000` | 连接超时 (毫秒) |
 | `timeout.send` | int | `5000` | 发送超时 (毫秒) |
 | `timeout.recv` | int | `5000` | 接收超时 (毫秒) |
