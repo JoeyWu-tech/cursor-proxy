@@ -271,6 +271,10 @@ $configJson = @{
         "language_server_windows",
         "Antigravity.exe"
     )
+    proxy_rules = @{
+        allowed_ports = @(80, 443)
+        dns_mode = "direct"
+    }
 } | ConvertTo-Json -Depth 4
 
 $configPath = Join-Path $OutputDir "config.json"
@@ -320,7 +324,11 @@ Antigravity-Proxy 是一个基于 MinHook 的 Windows DLL 代理注入工具。
     "target_processes": [          // 目标进程列表 (空数组=注入所有子进程)
         "language_server_windows",
         "Antigravity.exe"
-    ]
+    ],
+    "proxy_rules": {
+        "allowed_ports": [80, 443], // 端口白名单 (仅这些端口走代理, 空=全部)
+        "dns_mode": "direct"        // DNS策略: direct(直连) 或 proxy(走代理)
+    }
 }
 ``````
 
@@ -362,6 +370,8 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
 | traffic_logging | 是否记录流量日志 | false |
 | child_injection | 是否注入子进程 | true |
 | target_processes | 目标进程列表 (空=全部) | [] |
+| proxy_rules.allowed_ports | 端口白名单 (空=全部) | [80, 443] |
+| proxy_rules.dns_mode | DNS策略 (direct/proxy) | direct |
 
 ## v1.1.0 更新说明
 
@@ -369,6 +379,9 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
 1. **目标进程过滤**: 可配置 `target_processes` 数组，仅对指定进程注入 DLL
 2. **回环地址 bypass**: `127.0.0.1`、`localhost` 等本地地址不再走代理
 3. **日志中文化**: 所有日志已统一为中文输出
+4. **智能路由规则**: 新增 `proxy_rules` 配置，支持端口白名单和 DNS 策略
+   - `allowed_ports`: 仅指定端口走代理，其他直连
+   - `dns_mode`: DNS (53端口) 可选直连或走代理
 
 ### 配置示例
 ```json

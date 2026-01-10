@@ -26,6 +26,26 @@ namespace Core {
         int recv_ms = 5000;
     };
 
+    // ============= 代理路由规则 =============
+    // 用于控制哪些端口走代理、DNS 53 端口的特殊处理策略
+    struct ProxyRules {
+        // 允许代理的目标端口白名单（为空则代理所有端口）
+        // 默认: 仅代理 HTTP(80) 和 HTTPS(443)
+        std::vector<uint16_t> allowed_ports = {80, 443};
+        
+        // DNS (Port 53) 处理策略
+        // "direct" - 直连, 不经代理 (默认, 解决 DNS 超时问题)
+        // "proxy"  - 走代理
+        std::string dns_mode = "direct";
+        
+        // 快速判断端口是否在白名单中
+        bool IsPortAllowed(uint16_t port) const {
+            if (allowed_ports.empty()) return true; // 空白名单 = 允许所有
+            return std::find(allowed_ports.begin(), allowed_ports.end(), port) 
+                   != allowed_ports.end();
+        }
+    };
+
     class Config {
     private:
         // 判断路径是否为绝对路径（Windows 盘符或 UNC 路径）
@@ -68,6 +88,7 @@ namespace Core {
         ProxyConfig proxy;
         FakeIPConfig fakeIp;
         TimeoutConfig timeout;
+        ProxyRules rules;               // 代理路由规则
         bool trafficLogging = false;    // Phase 3: 是否启用流量监控日志
         bool childInjection = true;     // Phase 2: 是否自动注入子进程
         std::vector<std::string> targetProcesses; // 目标进程列表 (空=全部)
@@ -159,6 +180,25 @@ namespace Core {
                     timeout.send_ms = t.value("send", 5000);
                     timeout.recv_ms = t.value("recv", 5000);
                 }
+
+                // ============= 代理路由规则解析 =============
+                if (j.contains("proxy_rules")) {
+                    auto& pr = j["proxy_rules"];
+                    // 解析端口白名单
+                    if (pr.contains("allowed_ports") && pr["allowed_ports"].is_array()) {
+                        rules.allowed_ports.clear();
+                        for (const auto& p : pr["allowed_ports"]) {
+                            if (p.is_number_unsigned()) {
+                                rules.allowed_ports.push_back(static_cast<uint16_t>(p.get<unsigned int>()));
+                            }
+                        }
+                    }
+                    // 解析 DNS 策略
+                    rules.dns_mode = pr.value("dns_mode", "direct");
+                    Logger::Info("路由规则: allowed_ports=" + std::to_string(rules.allowed_ports.size()) + 
+                                 " 项, dns_mode=" + rules.dns_mode);
+                }
+
 
                 // Phase 2/3 配置项
                 trafficLogging = j.value("traffic_logging", false);

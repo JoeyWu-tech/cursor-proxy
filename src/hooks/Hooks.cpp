@@ -361,6 +361,25 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
         return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
     }
     
+    // ============= 智能路由决策 =============
+    // ROUTE-1: DNS 端口特殊处理 (解决 DNS 超时问题)
+    if (originalPort == 53) {
+        if (config.rules.dns_mode == "direct" || config.rules.dns_mode.empty()) {
+            Core::Logger::Info("DNS 请求直连 (策略: direct), 目标: " + originalHost + ":53");
+            return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) 
+                         : fpConnect(s, name, namelen);
+        }
+        // dns_mode == "proxy" 则继续走后面的代理逻辑
+        Core::Logger::Info("DNS 请求走代理 (策略: proxy), 目标: " + originalHost + ":53");
+    }
+    
+    // ROUTE-2: 端口白名单过滤
+    if (!config.rules.IsPortAllowed(originalPort)) {
+        Core::Logger::Info("端口 " + std::to_string(originalPort) + " 不在白名单, 直连: " + originalHost);
+        return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) 
+                     : fpConnect(s, name, namelen);
+    }
+    
     // 如果配置了代理
     if (config.proxy.port != 0) {
         Core::Logger::Info("正重定向 " + originalHost + ":" + std::to_string(originalPort) + " 到代理");

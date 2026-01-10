@@ -461,7 +461,11 @@ target_link_libraries(version PRIVATE ws2_32)
         "recv": 5000
     },
     "child_injection": true,
-    "target_processes": []
+    "target_processes": [],
+    "proxy_rules": {
+        "allowed_ports": [80, 443],
+        "dns_mode": "direct"
+    }
 }
 ```
 
@@ -493,6 +497,8 @@ target_link_libraries(version PRIVATE ws2_32)
 | `child_injection` | bool | `true` | 是否注入子进程 |
 | `traffic_logging` | bool | `false` | 是否记录流量日志 |
 | `target_processes` | array | `[]` | 目标进程列表 (空=全部) |
+| `proxy_rules.allowed_ports` | array | `[80, 443]` | 端口白名单 (空=全部) |
+| `proxy_rules.dns_mode` | string | `"direct"` | DNS策略: `direct`(直连) / `proxy`(走代理) |
 
 ### 验证是否生效 / Verification
 
