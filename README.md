@@ -786,6 +786,27 @@ MinHook 部分版权归 **Tsuda Kageyu** 所有。
       <img src="img/wx_gzh_qr.jpg" alt="公众号二维码" width="200"/><br/>
       <sub>关注公众号</sub>
     </td>
+    <td align="center">
+      <img src="img/qun-21.png" alt="微信群二维码" width="200"/><br/>
+      <sub>🔥 加入微信交流群</sub>
+    </td>
+  </tr>
+</table>
+
+### 💰 打赏支持 / Donate
+
+如果这个项目帮到了你，可以请作者喝杯咖啡 ☕
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="img/wx_zsm.jpg" alt="微信赞赏码" width="200"/><br/>
+      <sub>微信赞赏</sub>
+    </td>
+    <td align="center">
+      <img src="img/zfb.png" alt="支付宝收款码" width="200"/><br/>
+      <sub>支付宝打赏</sub>
+    </td>
   </tr>
 </table>
 
