@@ -609,8 +609,53 @@ If this project helps you, feel free to:
       <img src="img/wx_gzh_qr.jpg" alt="Official Account QR Code" width="200"/><br/>
       <sub>Follow Official Account</sub>
     </td>
+    <td align="center">
+      <img src="img/qun-21.png" alt="WeChat Group QR Code" width="200"/><br/>
+      <sub>🔥 Join WeChat Group</sub>
+    </td>
   </tr>
 </table>
+
+### 💰 Donate
+
+If this project helped you, consider buying the author a coffee ☕
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="img/wx_zsm.jpg" alt="WeChat Reward" width="200"/><br/>
+      <sub>WeChat Reward</sub>
+    </td>
+    <td align="center">
+      <img src="img/zfb.png" alt="Alipay" width="200"/><br/>
+      <sub>Alipay</sub>
+    </td>
+  </tr>
+</table>
+
+### 💳 Cryptocurrency
+
+For international supporters, crypto donations are also welcome:
+
+<details>
+<summary><b>🪙 View Crypto Addresses (Click to expand)</b></summary>
+
+#### 1️⃣ USDT (Tether) & Stablecoins
+
+| Network | Address |
+|---------|---------|
+| 🔴 **TRC-20 (Tron)** | `TFbJNoY5Lep5ZrDwBbT8rV1i8xR4ZhX53k` |
+| 🟡 **Polygon / BSC / Arbitrum** 🔥 *Cheapest Fees* | `0x44f8925b9f93b3d6da8d5ad26a3516e3e652cc88` |
+
+> *The EVM address supports USDT on Polygon, BSC, and Arbitrum One*
+
+#### 2️⃣ Litecoin (LTC) ✅ Low Fees
+
+| Network | Address |
+|---------|---------|
+| 🔵 **Litecoin** | `LVrigKxtWfPymMRtRqL3z2eZxfncR3dPV7` |
+
+</details>
 
 ---
 
