@@ -767,6 +767,7 @@ MinHook 部分版权归 **Tsuda Kageyu** 所有。
 | 平台 | 信息 |
 |------|------|
 | **微信** | JavaRookie666 |
+| **Telegram** | [@yuaotian](https://t.me/yuaotian) |
 | **GitHub** | [@yuaotian](https://github.com/yuaotian) |
 
 ### 🎁 支持作者 / Support

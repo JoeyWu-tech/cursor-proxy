@@ -590,6 +590,7 @@ MinHook portion is copyrighted by **Tsuda Kageyu**.
 | Platform | Info |
 |----------|------|
 | **WeChat** | JavaRookie666 |
+| **Telegram** | [@yuaotian](https://t.me/yuaotian) |
 | **GitHub** | [@yuaotian](https://github.com/yuaotian) |
 
 ### 🎁 Support
