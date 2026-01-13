@@ -1,0 +1,27 @@
+IPv6 代理支持说明
+
+用途
+解决 IPv6 连接被强制阻止的问题，并在需要时让 IPv6 也走代理。
+
+配置项
+proxy_rules.ipv6_mode 取值说明
+proxy  IPv6 走代理（默认，兼容 v4/v6）
+direct IPv6 直连（不走代理）
+block  阻止 IPv6 连接
+
+推荐设置
+默认就是 proxy；如需严格禁用 IPv6，可在配置里改成 block。
+
+示例配置片段
+{
+  "proxy_rules": {
+    "allowed_ports": [80, 443],
+    "dns_mode": "direct",
+    "ipv6_mode": "proxy"
+  }
+}
+
+注意事项
+1) 如果目标程序使用 IPv6-only socket，而代理只监听 IPv4(127.0.0.1)，IPv6 代理可能失败。
+   建议让 v2rayN 同时监听 ::1 或开启双栈；或将 proxy.host 改为 ::1（前提是实际监听）。
+2) ipv6_mode=direct 会允许 IPv6 直连，可能绕过代理。

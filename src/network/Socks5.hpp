@@ -72,20 +72,28 @@ namespace Network {
             request.push_back(Socks5::CMD_CONNECT);
             request.push_back(0x00); // RSV
             
-            in_addr addr;
+            in_addr addr{};
             if (inet_pton(AF_INET, targetHost.c_str(), &addr) == 1) {
-                // IPv4 Address
+                // IPv4 地址
                 request.push_back(Socks5::ATYP_IPV4);
                 request.push_back((addr.s_addr >> 0) & 0xFF);
                 request.push_back((addr.s_addr >> 8) & 0xFF);
                 request.push_back((addr.s_addr >> 16) & 0xFF);
                 request.push_back((addr.s_addr >> 24) & 0xFF);
             } else {
-                // Domain Name
-                request.push_back(Socks5::ATYP_DOMAIN);
-                uint8_t len = static_cast<uint8_t>(targetHost.length());
-                request.push_back(len);
-                for (char c : targetHost) request.push_back(c);
+                in6_addr addr6{};
+                if (inet_pton(AF_INET6, targetHost.c_str(), &addr6) == 1) {
+                    // IPv6 地址
+                    request.push_back(Socks5::ATYP_IPV6);
+                    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&addr6);
+                    for (int i = 0; i < 16; ++i) request.push_back(bytes[i]);
+                } else {
+                    // 域名
+                    request.push_back(Socks5::ATYP_DOMAIN);
+                    uint8_t len = static_cast<uint8_t>(targetHost.length());
+                    request.push_back(len);
+                    for (char c : targetHost) request.push_back(c);
+                }
             }
             
             // Port (Network Byte Order)

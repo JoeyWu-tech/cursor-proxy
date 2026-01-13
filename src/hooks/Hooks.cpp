@@ -109,20 +109,51 @@ static std::string WideToUtf8(PCWSTR input) {
 }
 
 static bool ResolveOriginalTarget(const sockaddr* name, std::string* host, uint16_t* port) {
-    if (!name || name->sa_family != AF_INET) return false;
-    auto* addr = (sockaddr_in*)name;
-    if (port) *port = ntohs(addr->sin_port);
-    if (host) {
-        if (Network::FakeIP::Instance().IsFakeIP(addr->sin_addr.s_addr)) {
-            *host = Network::FakeIP::Instance().GetDomain(addr->sin_addr.s_addr);
-            if (host->empty()) {
+    if (!name) return false;
+    if (name->sa_family == AF_INET) {
+        auto* addr = (sockaddr_in*)name;
+        if (port) *port = ntohs(addr->sin_port);
+        if (host) {
+            if (Network::FakeIP::Instance().IsFakeIP(addr->sin_addr.s_addr)) {
+                *host = Network::FakeIP::Instance().GetDomain(addr->sin_addr.s_addr);
+                if (host->empty()) {
+                    *host = Network::FakeIP::IpToString(addr->sin_addr.s_addr);
+                }
+            } else {
                 *host = Network::FakeIP::IpToString(addr->sin_addr.s_addr);
             }
-        } else {
-            *host = Network::FakeIP::IpToString(addr->sin_addr.s_addr);
         }
+        return true;
     }
-    return true;
+    if (name->sa_family == AF_INET6) {
+        auto* addr6 = (sockaddr_in6*)name;
+        if (port) *port = ntohs(addr6->sin6_port);
+        if (host) {
+            if (IN6_IS_ADDR_V4MAPPED(&addr6->sin6_addr)) {
+                // IPv4-mapped IPv6 继续走 FakeIP 映射，保持域名还原能力
+                in_addr addr4{};
+                const unsigned char* raw = reinterpret_cast<const unsigned char*>(&addr6->sin6_addr);
+                memcpy(&addr4, raw + 12, sizeof(addr4));
+                if (Network::FakeIP::Instance().IsFakeIP(addr4.s_addr)) {
+                    *host = Network::FakeIP::Instance().GetDomain(addr4.s_addr);
+                    if (host->empty()) {
+                        *host = Network::FakeIP::IpToString(addr4.s_addr);
+                    }
+                } else {
+                    *host = Network::FakeIP::IpToString(addr4.s_addr);
+                }
+            } else {
+                char buf[INET6_ADDRSTRLEN] = {};
+                if (!inet_ntop(AF_INET6, &addr6->sin6_addr, buf, sizeof(buf))) {
+                    *host = "";
+                } else {
+                    *host = std::string(buf);
+                }
+            }
+        }
+        return true;
+    }
+    return false;
 }
 
 static bool IsLoopbackHost(const std::string& host) {
@@ -200,24 +231,110 @@ static bool BuildProxyAddr(const Core::ProxyConfig& proxy, sockaddr_in* proxyAdd
     return true;
 }
 
-// 解析目标域名为 IPv4 地址，供 WSAConnectByName 走代理
-static bool ResolveNameToAddr(const std::string& node, const std::string& service, sockaddr_in* out) {
-    if (!out || node.empty()) return false;
+static bool BuildProxyAddrV6(const Core::ProxyConfig& proxy, sockaddr_in6* proxyAddr, const sockaddr_in6* baseAddr) {
+    if (!proxyAddr) return false;
+    if (baseAddr) {
+        *proxyAddr = *baseAddr;
+    } else {
+        memset(proxyAddr, 0, sizeof(sockaddr_in6));
+    }
+    proxyAddr->sin6_family = AF_INET6;
+    
+    in6_addr addr6{};
+    if (inet_pton(AF_INET6, proxy.host.c_str(), &addr6) == 1) {
+        proxyAddr->sin6_addr = addr6;
+    } else {
+        in_addr addr4{};
+        if (inet_pton(AF_INET, proxy.host.c_str(), &addr4) == 1) {
+            // IPv4 代理地址映射为 IPv6，兼容双栈 socket
+            unsigned char* bytes = reinterpret_cast<unsigned char*>(&proxyAddr->sin6_addr);
+            memset(bytes, 0, 16);
+            bytes[10] = 0xff;
+            bytes[11] = 0xff;
+            memcpy(bytes + 12, &addr4, sizeof(addr4));
+        } else {
+            // 优先解析 IPv6，失败则回退 IPv4 并映射
+            addrinfo hints{};
+            hints.ai_family = AF_INET6;
+            hints.ai_socktype = SOCK_STREAM;
+            hints.ai_protocol = IPPROTO_TCP;
+            addrinfo* res = nullptr;
+            int rc = fpGetAddrInfo ? fpGetAddrInfo(proxy.host.c_str(), nullptr, &hints, &res)
+                                   : getaddrinfo(proxy.host.c_str(), nullptr, &hints, &res);
+            if (rc == 0 && res) {
+                proxyAddr->sin6_addr = ((sockaddr_in6*)res->ai_addr)->sin6_addr;
+                freeaddrinfo(res);
+            } else {
+                if (res) freeaddrinfo(res);
+                addrinfo hints4{};
+                hints4.ai_family = AF_INET;
+                hints4.ai_socktype = SOCK_STREAM;
+                hints4.ai_protocol = IPPROTO_TCP;
+                rc = fpGetAddrInfo ? fpGetAddrInfo(proxy.host.c_str(), nullptr, &hints4, &res)
+                                   : getaddrinfo(proxy.host.c_str(), nullptr, &hints4, &res);
+                if (rc != 0 || !res) {
+                    Core::Logger::Error("代理地址解析失败: " + proxy.host + ", 错误码=" + std::to_string(rc));
+                    return false;
+                }
+                in_addr resolved4 = ((sockaddr_in*)res->ai_addr)->sin_addr;
+                freeaddrinfo(res);
+                unsigned char* bytes = reinterpret_cast<unsigned char*>(&proxyAddr->sin6_addr);
+                memset(bytes, 0, 16);
+                bytes[10] = 0xff;
+                bytes[11] = 0xff;
+                memcpy(bytes + 12, &resolved4, sizeof(resolved4));
+            }
+        }
+    }
+    proxyAddr->sin6_port = htons(proxy.port);
+    return true;
+}
+
+// 按指定地址族解析目标地址
+static bool ResolveNameToAddrWithFamily(const std::string& node, const std::string& service, int family,
+                                        sockaddr_storage* out, int* outLen, int* outErr) {
+    if (!out || !outLen) return false;
     addrinfo hints{};
-    hints.ai_family = AF_INET;
+    hints.ai_family = family;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
     addrinfo* res = nullptr;
     const char* serviceStr = service.empty() ? nullptr : service.c_str();
     int rc = fpGetAddrInfo ? fpGetAddrInfo(node.c_str(), serviceStr, &hints, &res)
                            : getaddrinfo(node.c_str(), serviceStr, &hints, &res);
+    if (outErr) *outErr = rc;
     if (rc != 0 || !res) {
-        Core::Logger::Error("目标地址解析失败: " + node + ", 错误码=" + std::to_string(rc));
+        if (res) freeaddrinfo(res);
         return false;
     }
-    *out = *(sockaddr_in*)res->ai_addr;
+    if (res->ai_addrlen <= 0 || res->ai_addrlen > sizeof(sockaddr_storage)) {
+        freeaddrinfo(res);
+        if (outErr) *outErr = EAI_FAIL;
+        return false;
+    }
+    memset(out, 0, sizeof(sockaddr_storage));
+    memcpy(out, res->ai_addr, res->ai_addrlen);
+    *outLen = (int)res->ai_addrlen;
     freeaddrinfo(res);
     return true;
+}
+
+// 解析目标域名为地址，供 WSAConnectByName 走代理（IPv6 允许时优先 IPv6）
+static bool ResolveNameToAddr(const std::string& node, const std::string& service, const std::string& ipv6Mode,
+                              sockaddr_storage* out, int* outLen) {
+    if (!out || !outLen || node.empty()) return false;
+    int lastErr = 0;
+    const bool allowIpv6 = (ipv6Mode == "proxy" || ipv6Mode == "direct");
+    if (allowIpv6) {
+        if (ResolveNameToAddrWithFamily(node, service, AF_INET6, out, outLen, &lastErr)) {
+            return true;
+        }
+    }
+    if (ResolveNameToAddrWithFamily(node, service, AF_INET, out, outLen, &lastErr)) {
+        return true;
+    }
+    Core::Logger::Error("目标地址解析失败: " + node + ", 错误码=" + std::to_string(lastErr));
+    return false;
 }
 
 static bool DoProxyHandshake(SOCKET s, const std::string& host, uint16_t port) {
@@ -328,17 +445,42 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
         WSASetLastError(WSAEINVAL);
         return SOCKET_ERROR;
     }
+    if (name->sa_family == AF_INET6 && namelen < (int)sizeof(sockaddr_in6)) {
+        WSASetLastError(WSAEINVAL);
+        return SOCKET_ERROR;
+    }
     
-    if (name->sa_family != AF_INET) {
+    if (name->sa_family == AF_INET6) {
         std::string addrStr = SockaddrToString(name);
         if (config.proxy.port != 0) {
-            // 强制 IPv4：阻止 IPv6 直连，避免绕过代理
-            Core::Logger::Warn("已阻止非 IPv4 连接(强制 IPv4), family=" + std::to_string((int)name->sa_family) +
+            const std::string& ipv6Mode = config.rules.ipv6_mode;
+            if (ipv6Mode == "direct") {
+                Core::Logger::Info("IPv6 连接已直连(策略: direct), family=" + std::to_string((int)name->sa_family) +
+                                   (addrStr.empty() ? "" : ", addr=" + addrStr));
+                return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
+            }
+            if (ipv6Mode != "proxy") {
+                // 强制阻止 IPv6，避免绕过代理
+                Core::Logger::Warn("已阻止 IPv6 连接(策略: block), family=" + std::to_string((int)name->sa_family) +
+                                   (addrStr.empty() ? "" : ", addr=" + addrStr));
+                WSASetLastError(WSAEAFNOSUPPORT);
+                return SOCKET_ERROR;
+            }
+        } else {
+            Core::Logger::Info("IPv6 连接已直连, family=" + std::to_string((int)name->sa_family) +
+                               (addrStr.empty() ? "" : ", addr=" + addrStr));
+            return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
+        }
+    } else if (name->sa_family != AF_INET) {
+        std::string addrStr = SockaddrToString(name);
+        if (config.proxy.port != 0) {
+            // 非 IPv4/IPv6 连接一律阻止，避免绕过代理
+            Core::Logger::Warn("已阻止非 IPv4/IPv6 连接, family=" + std::to_string((int)name->sa_family) +
                                (addrStr.empty() ? "" : ", addr=" + addrStr));
             WSASetLastError(WSAEAFNOSUPPORT);
             return SOCKET_ERROR;
         }
-        Core::Logger::Info("非 IPv4 连接已直连, family=" + std::to_string((int)name->sa_family) +
+        Core::Logger::Info("非 IPv4/IPv6 连接已直连, family=" + std::to_string((int)name->sa_family) +
                            (addrStr.empty() ? "" : ", addr=" + addrStr));
         return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
     }
@@ -386,17 +528,27 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
     if (config.proxy.port != 0) {
         Core::Logger::Info("正重定向 " + originalHost + ":" + std::to_string(originalPort) + " 到代理");
         
-        // 修改目标地址为代理服务器
-        sockaddr_in proxyAddr{};
-        if (!BuildProxyAddr(config.proxy, &proxyAddr, (sockaddr_in*)name)) {
-            WSASetLastError(WSAEINVAL);
-            return SOCKET_ERROR;
+        // 修改目标地址为代理服务器（按地址族构造）
+        int result = 0;
+        if (name->sa_family == AF_INET6) {
+            sockaddr_in6 proxyAddr6{};
+            if (!BuildProxyAddrV6(config.proxy, &proxyAddr6, (sockaddr_in6*)name)) {
+                WSASetLastError(WSAEINVAL);
+                return SOCKET_ERROR;
+            }
+            result = isWsa ?
+                fpWSAConnect(s, (sockaddr*)&proxyAddr6, sizeof(proxyAddr6), NULL, NULL, NULL, NULL) :
+                fpConnect(s, (sockaddr*)&proxyAddr6, sizeof(proxyAddr6));
+        } else {
+            sockaddr_in proxyAddr{};
+            if (!BuildProxyAddr(config.proxy, &proxyAddr, (sockaddr_in*)name)) {
+                WSASetLastError(WSAEINVAL);
+                return SOCKET_ERROR;
+            }
+            result = isWsa ? 
+                fpWSAConnect(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr), NULL, NULL, NULL, NULL) :
+                fpConnect(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr));
         }
-        
-        // 连接到代理
-        int result = isWsa ? 
-            fpWSAConnect(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr), NULL, NULL, NULL, NULL) :
-            fpConnect(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr));
         
         if (result != 0) {
             int err = WSAGetLastError();
@@ -529,14 +681,15 @@ BOOL WSAAPI DetourWSAConnectByNameA(
     }
     auto& config = Core::Config::Instance();
     if (config.proxy.port != 0 && !node.empty() && !Reserved) {
-        sockaddr_in targetAddr{};
-        if (ResolveNameToAddr(node, service, &targetAddr)) {
+        sockaddr_storage targetAddr{};
+        int targetLen = 0;
+        if (ResolveNameToAddr(node, service, config.rules.ipv6_mode, &targetAddr, &targetLen)) {
             // 回填目标地址（如调用方提供缓冲区）
-            if (RemoteAddress && RemoteAddressLength && *RemoteAddressLength >= sizeof(sockaddr_in)) {
-                memcpy(RemoteAddress, &targetAddr, sizeof(sockaddr_in));
-                *RemoteAddressLength = sizeof(sockaddr_in);
+            if (RemoteAddress && RemoteAddressLength && *RemoteAddressLength >= (DWORD)targetLen) {
+                memcpy(RemoteAddress, &targetAddr, targetLen);
+                *RemoteAddressLength = (DWORD)targetLen;
             }
-            int rc = PerformProxyConnect(s, (sockaddr*)&targetAddr, sizeof(targetAddr), true);
+            int rc = PerformProxyConnect(s, (sockaddr*)&targetAddr, targetLen, true);
             return rc == 0 ? TRUE : FALSE;
         }
         Core::Logger::Warn("WSAConnectByNameA 解析失败，回退原始实现");
@@ -568,14 +721,15 @@ BOOL WSAAPI DetourWSAConnectByNameW(
     }
     auto& config = Core::Config::Instance();
     if (config.proxy.port != 0 && !node.empty() && !Reserved) {
-        sockaddr_in targetAddr{};
-        if (ResolveNameToAddr(node, service, &targetAddr)) {
+        sockaddr_storage targetAddr{};
+        int targetLen = 0;
+        if (ResolveNameToAddr(node, service, config.rules.ipv6_mode, &targetAddr, &targetLen)) {
             // 回填目标地址（如调用方提供缓冲区）
-            if (RemoteAddress && RemoteAddressLength && *RemoteAddressLength >= sizeof(sockaddr_in)) {
-                memcpy(RemoteAddress, &targetAddr, sizeof(sockaddr_in));
-                *RemoteAddressLength = sizeof(sockaddr_in);
+            if (RemoteAddress && RemoteAddressLength && *RemoteAddressLength >= (DWORD)targetLen) {
+                memcpy(RemoteAddress, &targetAddr, targetLen);
+                *RemoteAddressLength = (DWORD)targetLen;
             }
-            int rc = PerformProxyConnect(s, (sockaddr*)&targetAddr, sizeof(targetAddr), true);
+            int rc = PerformProxyConnect(s, (sockaddr*)&targetAddr, targetLen, true);
             return rc == 0 ? TRUE : FALSE;
         }
         Core::Logger::Warn("WSAConnectByNameW 解析失败，回退原始实现");
@@ -649,21 +803,46 @@ BOOL PASCAL DetourConnectEx(
         WSASetLastError(WSAEINVAL);
         return FALSE;
     }
+    if (name->sa_family == AF_INET6 && namelen < (int)sizeof(sockaddr_in6)) {
+        WSASetLastError(WSAEINVAL);
+        return FALSE;
+    }
     
     auto& config = Core::Config::Instance();
     Network::SocketWrapper sock(s);
     sock.SetTimeouts(config.timeout.recv_ms, config.timeout.send_ms);
     
-    if (name->sa_family != AF_INET) {
+    if (name->sa_family == AF_INET6) {
         std::string addrStr = SockaddrToString(name);
         if (config.proxy.port != 0) {
-            // 强制 IPv4：阻止 IPv6 直连，避免绕过代理
-            Core::Logger::Warn("ConnectEx 已阻止非 IPv4 连接(强制 IPv4), family=" + std::to_string((int)name->sa_family) +
+            const std::string& ipv6Mode = config.rules.ipv6_mode;
+            if (ipv6Mode == "direct") {
+                Core::Logger::Info("ConnectEx IPv6 连接已直连(策略: direct), family=" + std::to_string((int)name->sa_family) +
+                                   (addrStr.empty() ? "" : ", addr=" + addrStr));
+                return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+            }
+            if (ipv6Mode != "proxy") {
+                // 强制阻止 IPv6，避免绕过代理
+                Core::Logger::Warn("ConnectEx 已阻止 IPv6 连接(策略: block), family=" + std::to_string((int)name->sa_family) +
+                                   (addrStr.empty() ? "" : ", addr=" + addrStr));
+                WSASetLastError(WSAEAFNOSUPPORT);
+                return FALSE;
+            }
+        } else {
+            Core::Logger::Info("ConnectEx IPv6 连接已直连, family=" + std::to_string((int)name->sa_family) +
+                               (addrStr.empty() ? "" : ", addr=" + addrStr));
+            return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+        }
+    } else if (name->sa_family != AF_INET) {
+        std::string addrStr = SockaddrToString(name);
+        if (config.proxy.port != 0) {
+            // 非 IPv4/IPv6 连接一律阻止，避免绕过代理
+            Core::Logger::Warn("ConnectEx 已阻止非 IPv4/IPv6 连接, family=" + std::to_string((int)name->sa_family) +
                                (addrStr.empty() ? "" : ", addr=" + addrStr));
             WSASetLastError(WSAEAFNOSUPPORT);
             return FALSE;
         }
-        Core::Logger::Info("ConnectEx 非 IPv4 连接已直连, family=" + std::to_string((int)name->sa_family) +
+        Core::Logger::Info("ConnectEx 非 IPv4/IPv6 连接已直连, family=" + std::to_string((int)name->sa_family) +
                            (addrStr.empty() ? "" : ", addr=" + addrStr));
         return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
     }
@@ -684,15 +863,25 @@ BOOL PASCAL DetourConnectEx(
     
     Core::Logger::Info("ConnectEx 正重定向 " + originalHost + ":" + std::to_string(originalPort) + " 到代理");
     
-    sockaddr_in proxyAddr{};
-    if (!BuildProxyAddr(config.proxy, &proxyAddr, (sockaddr_in*)name)) {
-        WSASetLastError(WSAEINVAL);
-        return FALSE;
-    }
-    
     DWORD ignoredBytes = 0;
-    BOOL result = fpConnectEx(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr), NULL, 0,
-                              lpdwBytesSent ? lpdwBytesSent : &ignoredBytes, lpOverlapped);
+    BOOL result = FALSE;
+    if (name->sa_family == AF_INET6) {
+        sockaddr_in6 proxyAddr6{};
+        if (!BuildProxyAddrV6(config.proxy, &proxyAddr6, (sockaddr_in6*)name)) {
+            WSASetLastError(WSAEINVAL);
+            return FALSE;
+        }
+        result = fpConnectEx(s, (sockaddr*)&proxyAddr6, sizeof(proxyAddr6), NULL, 0,
+                             lpdwBytesSent ? lpdwBytesSent : &ignoredBytes, lpOverlapped);
+    } else {
+        sockaddr_in proxyAddr{};
+        if (!BuildProxyAddr(config.proxy, &proxyAddr, (sockaddr_in*)name)) {
+            WSASetLastError(WSAEINVAL);
+            return FALSE;
+        }
+        result = fpConnectEx(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr), NULL, 0,
+                             lpdwBytesSent ? lpdwBytesSent : &ignoredBytes, lpOverlapped);
+    }
     if (!result) {
         int err = WSAGetLastError();
         if (err == WSA_IO_PENDING) {

@@ -274,6 +274,7 @@ $configJson = @{
     proxy_rules = @{
         allowed_ports = @(80, 443)
         dns_mode = "direct"
+        ipv6_mode = "proxy"
     }
 } | ConvertTo-Json -Depth 4
 
@@ -327,7 +328,8 @@ Antigravity-Proxy 是一个基于 MinHook 的 Windows DLL 代理注入工具。
     ],
     "proxy_rules": {
         "allowed_ports": [80, 443], // 端口白名单 (仅这些端口走代理, 空=全部)
-        "dns_mode": "direct"        // DNS策略: direct(直连) 或 proxy(走代理)
+        "dns_mode": "direct",       // DNS策略: direct(直连) 或 proxy(走代理)
+        "ipv6_mode": "proxy"        // IPv6策略: proxy(走代理) / direct(直连) / block(阻止)
     }
 }
 ``````
@@ -372,6 +374,7 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
 | target_processes | 目标进程列表 (空=全部) | [] |
 | proxy_rules.allowed_ports | 端口白名单 (空=全部) | [80, 443] |
 | proxy_rules.dns_mode | DNS策略 (direct/proxy) | direct |
+| proxy_rules.ipv6_mode | IPv6策略 (proxy/direct/block) | proxy |
 
 ## v1.1.0 更新说明
 

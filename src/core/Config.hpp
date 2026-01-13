@@ -38,6 +38,12 @@ namespace Core {
         // "proxy"  - 走代理
         std::string dns_mode = "direct";
         
+        // IPv6 处理策略
+        // "proxy"  - IPv6 走代理 (默认，兼容 IPv4/IPv6)
+        // "direct" - IPv6 直连
+        // "block"  - 阻止 IPv6 连接
+        std::string ipv6_mode = "proxy";
+        
         // 快速判断端口是否在白名单中
         bool IsPortAllowed(uint16_t port) const {
             if (allowed_ports.empty()) return true; // 空白名单 = 允许所有
@@ -181,7 +187,9 @@ namespace Core {
                 }
 
                 // ============= 代理路由规则解析 =============
+                bool hasProxyRules = false;
                 if (j.contains("proxy_rules")) {
+                    hasProxyRules = true;
                     auto& pr = j["proxy_rules"];
                     // 解析端口白名单
                     if (pr.contains("allowed_ports") && pr["allowed_ports"].is_array()) {
@@ -194,9 +202,16 @@ namespace Core {
                     }
                     // 解析 DNS 策略
                     rules.dns_mode = pr.value("dns_mode", "direct");
-                    Logger::Info("路由规则: allowed_ports=" + std::to_string(rules.allowed_ports.size()) + 
-                                 " 项, dns_mode=" + rules.dns_mode);
+                    // 解析 IPv6 策略，统一为小写，避免大小写导致配置失效
+                    rules.ipv6_mode = pr.value("ipv6_mode", "proxy");
+                    std::transform(rules.ipv6_mode.begin(), rules.ipv6_mode.end(),
+                                   rules.ipv6_mode.begin(),
+                                   [](unsigned char c) { return (char)std::tolower(c); });
+                    if (rules.ipv6_mode.empty()) rules.ipv6_mode = "proxy";
                 }
+                Logger::Info("路由规则: allowed_ports=" + std::to_string(rules.allowed_ports.size()) + 
+                             " 项, dns_mode=" + rules.dns_mode + ", ipv6_mode=" + rules.ipv6_mode +
+                             (hasProxyRules ? "" : " (默认)"));
 
 
                 // Phase 2/3 配置项

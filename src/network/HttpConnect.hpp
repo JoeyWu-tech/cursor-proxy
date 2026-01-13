@@ -29,9 +29,15 @@ namespace Network {
         static bool Handshake(SOCKET sock, const std::string& targetHost, uint16_t targetPort) {
             // 构造 CONNECT 请求
             // 格式: CONNECT host:port HTTP/1.1\r\nHost: host:port\r\n\r\n
+            std::string hostForHeader = targetHost;
+            in6_addr addr6{};
+            if (inet_pton(AF_INET6, targetHost.c_str(), &addr6) == 1) {
+                // IPv6 字面量需要方括号包裹，符合 HTTP CONNECT 语法
+                hostForHeader = "[" + targetHost + "]";
+            }
             std::ostringstream request;
-            request << "CONNECT " << targetHost << ":" << targetPort << " HTTP/1.1\r\n";
-            request << "Host: " << targetHost << ":" << targetPort << "\r\n";
+            request << "CONNECT " << hostForHeader << ":" << targetPort << " HTTP/1.1\r\n";
+            request << "Host: " << hostForHeader << ":" << targetPort << "\r\n";
             request << "\r\n";
             
             std::string requestStr = request.str();
