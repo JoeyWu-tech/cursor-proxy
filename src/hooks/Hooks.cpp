@@ -90,13 +90,17 @@ struct ConnectExContext {
 static std::unordered_map<LPOVERLAPPED, ConnectExContext> g_connectExPending;
 static std::mutex g_connectExMtx;
 static std::mutex g_connectExHookMtx;
-static bool g_connectExHookInstalled = false;
+// ConnectEx 在不同 Provider 下可能返回不同函数指针，这里按 CatalogEntryId 记录各自的 trampoline
+static std::unordered_map<DWORD, LPFN_CONNECTEX> g_connectExOriginalByCatalog;
 static const ULONGLONG kConnectExPendingTtlMs = 60000; // 超过 60 秒的上下文视为过期
 
 // 为了避免日志被大量非目标进程淹没，这里仅首次记录“跳过注入”的进程名
 static std::unordered_map<std::string, bool> g_loggedSkipProcesses;
 static std::mutex g_loggedSkipProcessesMtx;
 static const size_t kMaxLoggedSkipProcesses = 256; // 限制缓存规模，避免无限增长
+
+// 运行时配置摘要仅打印一次，方便收集“别人不行”的现场信息
+static std::once_flag g_runtimeConfigLogOnce;
 
 static std::string WideToUtf8(PCWSTR input) {
     if (!input) return "";
@@ -108,6 +112,101 @@ static std::string WideToUtf8(PCWSTR input) {
     return result;
 }
 
+// 获取 socket 类型（SOCK_STREAM / SOCK_DGRAM），用于避免误把 UDP/QUIC 当成 TCP 走代理
+static bool TryGetSocketType(SOCKET s, int* outType) {
+    if (!outType) return false;
+    *outType = 0;
+    int soType = 0;
+    int optLen = sizeof(soType);
+    if (getsockopt(s, SOL_SOCKET, SO_TYPE, (char*)&soType, &optLen) != 0) {
+        return false;
+    }
+    *outType = soType;
+    return true;
+}
+
+static bool IsStreamSocket(SOCKET s) {
+    int soType = 0;
+    if (!TryGetSocketType(s, &soType)) {
+        // 获取失败时不改变行为：默认认为是 SOCK_STREAM，避免引入新的兼容性风险
+        return true;
+    }
+    return soType == SOCK_STREAM;
+}
+
+// 获取当前 socket 的 Provider CatalogEntryId，用于在多 Provider 环境下正确调用对应的 ConnectEx trampoline
+static bool TryGetSocketCatalogEntryId(SOCKET s, DWORD* outCatalogEntryId) {
+    if (!outCatalogEntryId) return false;
+    *outCatalogEntryId = 0;
+    WSAPROTOCOL_INFOA info{};
+    int optLen = sizeof(info);
+    if (getsockopt(s, SOL_SOCKET, SO_PROTOCOL_INFOA, (char*)&info, &optLen) != 0) {
+        return false;
+    }
+    *outCatalogEntryId = info.dwCatalogEntryId;
+    return true;
+}
+
+static LPFN_CONNECTEX GetOriginalConnectExForSocket(SOCKET s) {
+    static std::once_flag s_catalogMissingOnce;
+    static std::once_flag s_mapMissingOnce;
+
+    DWORD catalogId = 0;
+    if (TryGetSocketCatalogEntryId(s, &catalogId)) {
+        {
+            std::lock_guard<std::mutex> lock(g_connectExHookMtx);
+            auto it = g_connectExOriginalByCatalog.find(catalogId);
+            if (it != g_connectExOriginalByCatalog.end() && it->second) {
+                return it->second;
+            }
+        }
+        if (fpConnectEx) {
+            // 只记录一次，避免刷屏；用于定位“某些 Provider 的 ConnectEx 没被正确记录”的现场
+            std::call_once(s_mapMissingOnce, [catalogId]() {
+                Core::Logger::Warn("ConnectEx: 未找到 CatalogEntryId=" + std::to_string(catalogId) +
+                                   " 的 trampoline 映射，使用兜底实现");
+            });
+        }
+        return fpConnectEx;
+    }
+    // 兜底：兼容单 Provider 场景（或获取 Catalog 失败）
+    if (fpConnectEx) {
+        std::call_once(s_catalogMissingOnce, []() {
+            Core::Logger::Warn("ConnectEx: 无法获取 socket 的 CatalogEntryId，使用兜底实现");
+        });
+    }
+    return fpConnectEx;
+}
+
+static void LogRuntimeConfigSummaryOnce() {
+    std::call_once(g_runtimeConfigLogOnce, []() {
+        const auto& config = Core::Config::Instance();
+
+        std::string ports;
+        if (config.rules.allowed_ports.empty()) {
+            ports = "空(=全部)";
+        } else {
+            for (size_t i = 0; i < config.rules.allowed_ports.size(); i++) {
+                if (i != 0) ports += ",";
+                ports += std::to_string(config.rules.allowed_ports[i]);
+            }
+        }
+
+        Core::Logger::Info(
+            "配置摘要: proxy=" + config.proxy.type + "://" + config.proxy.host + ":" + std::to_string(config.proxy.port) +
+            ", fake_ip=" + std::string(config.fakeIp.enabled ? "开" : "关") +
+            ", cidr=" + config.fakeIp.cidr +
+            ", dns_mode=" + (config.rules.dns_mode.empty() ? "(空)" : config.rules.dns_mode) +
+            ", ipv6_mode=" + (config.rules.ipv6_mode.empty() ? "(空)" : config.rules.ipv6_mode) +
+            ", allowed_ports=" + ports +
+            ", timeout(connect/send/recv)=" + std::to_string(config.timeout.connect_ms) + "/" + std::to_string(config.timeout.send_ms) + "/" +
+                std::to_string(config.timeout.recv_ms) +
+            ", child_injection=" + std::string(config.childInjection ? "开" : "关") +
+            ", traffic_logging=" + std::string(config.trafficLogging ? "开" : "关")
+        );
+    });
+}
+
 static bool ResolveOriginalTarget(const sockaddr* name, std::string* host, uint16_t* port) {
     if (!name) return false;
     if (name->sa_family == AF_INET) {
@@ -115,9 +214,13 @@ static bool ResolveOriginalTarget(const sockaddr* name, std::string* host, uint1
         if (port) *port = ntohs(addr->sin_port);
         if (host) {
             if (Network::FakeIP::Instance().IsFakeIP(addr->sin_addr.s_addr)) {
-                *host = Network::FakeIP::Instance().GetDomain(addr->sin_addr.s_addr);
-                if (host->empty()) {
-                    *host = Network::FakeIP::IpToString(addr->sin_addr.s_addr);
+                std::string domain = Network::FakeIP::Instance().GetDomain(addr->sin_addr.s_addr);
+                if (domain.empty()) {
+                    std::string ipStr = Network::FakeIP::IpToString(addr->sin_addr.s_addr);
+                    Core::Logger::Warn("FakeIP 命中但映射缺失, ip=" + ipStr);
+                    *host = ipStr;
+                } else {
+                    *host = domain;
                 }
             } else {
                 *host = Network::FakeIP::IpToString(addr->sin_addr.s_addr);
@@ -135,9 +238,13 @@ static bool ResolveOriginalTarget(const sockaddr* name, std::string* host, uint1
                 const unsigned char* raw = reinterpret_cast<const unsigned char*>(&addr6->sin6_addr);
                 memcpy(&addr4, raw + 12, sizeof(addr4));
                 if (Network::FakeIP::Instance().IsFakeIP(addr4.s_addr)) {
-                    *host = Network::FakeIP::Instance().GetDomain(addr4.s_addr);
-                    if (host->empty()) {
-                        *host = Network::FakeIP::IpToString(addr4.s_addr);
+                    std::string domain = Network::FakeIP::Instance().GetDomain(addr4.s_addr);
+                    if (domain.empty()) {
+                        std::string ipStr = Network::FakeIP::IpToString(addr4.s_addr);
+                        Core::Logger::Warn("FakeIP(v4-mapped) 命中但映射缺失, ip=" + ipStr);
+                        *host = ipStr;
+                    } else {
+                        *host = domain;
                     }
                 } else {
                     *host = Network::FakeIP::IpToString(addr4.s_addr);
@@ -393,22 +500,27 @@ static void DropConnectExContext(LPOVERLAPPED ovl) {
     g_connectExPending.erase(ovl);
 }
 
-static bool HandleConnectExCompletion(LPOVERLAPPED ovl) {
+static bool HandleConnectExCompletion(LPOVERLAPPED ovl, DWORD* outSentBytes) {
+    if (outSentBytes) *outSentBytes = 0;
     ConnectExContext ctx{};
     if (!PopConnectExContext(ovl, &ctx)) return true;
     if (!DoProxyHandshake(ctx.sock, ctx.host, ctx.port)) {
         return false;
     }
     if (ctx.sendBuf && ctx.sendLen > 0) {
-        int sent = fpSend ? fpSend(ctx.sock, ctx.sendBuf, (int)ctx.sendLen, 0) : send(ctx.sock, ctx.sendBuf, (int)ctx.sendLen, 0);
-        if (sent == SOCKET_ERROR) {
+        // 使用统一 SendAll，兼容非阻塞 socket / partial send
+        auto& config = Core::Config::Instance();
+        if (!Network::SocketIo::SendAll(ctx.sock, ctx.sendBuf, (int)ctx.sendLen, config.timeout.send_ms)) {
             int err = WSAGetLastError();
             Core::Logger::Error("ConnectEx 发送首包失败, WSA错误码=" + std::to_string(err));
             WSASetLastError(err);
             return false;
         }
         if (ctx.bytesSent) {
-            *ctx.bytesSent = (DWORD)sent;
+            *ctx.bytesSent = (DWORD)ctx.sendLen;
+        }
+        if (outSentBytes) {
+            *outSentBytes = (DWORD)ctx.sendLen;
         }
     }
     return true;
@@ -427,6 +539,7 @@ BOOL PASCAL DetourConnectEx(
 // 执行代理连接逻辑
 int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool isWsa) {
     auto& config = Core::Config::Instance();
+    LogRuntimeConfigSummaryOnce();
     
     // 超时控制
     Network::SocketWrapper sock(s);
@@ -450,26 +563,40 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
         return SOCKET_ERROR;
     }
     
+    // 仅对 TCP (SOCK_STREAM) 做代理，避免误伤 UDP/QUIC 等
+    if (config.proxy.port != 0 && !IsStreamSocket(s)) {
+        int soType = 0;
+        TryGetSocketType(s, &soType);
+        Core::Logger::Info("非 SOCK_STREAM socket 直连, soType=" + std::to_string(soType));
+        return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
+    }
+
     if (name->sa_family == AF_INET6) {
-        std::string addrStr = SockaddrToString(name);
-        if (config.proxy.port != 0) {
-            const std::string& ipv6Mode = config.rules.ipv6_mode;
-            if (ipv6Mode == "direct") {
-                Core::Logger::Info("IPv6 连接已直连(策略: direct), family=" + std::to_string((int)name->sa_family) +
+        const auto* addr6 = (const sockaddr_in6*)name;
+        const bool isV4Mapped = IN6_IS_ADDR_V4MAPPED(&addr6->sin6_addr);
+
+        // v4-mapped IPv6 本质是 IPv4 连接：不应被 ipv6_mode 误伤（否则会影响 FakeIP v4-mapped 回填）
+        if (!isV4Mapped) {
+            std::string addrStr = SockaddrToString(name);
+            if (config.proxy.port != 0) {
+                const std::string& ipv6Mode = config.rules.ipv6_mode;
+                if (ipv6Mode == "direct") {
+                    Core::Logger::Info("IPv6 连接已直连(策略: direct), family=" + std::to_string((int)name->sa_family) +
+                                       (addrStr.empty() ? "" : ", addr=" + addrStr));
+                    return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
+                }
+                if (ipv6Mode != "proxy") {
+                    // 强制阻止 IPv6，避免绕过代理
+                    Core::Logger::Warn("已阻止 IPv6 连接(策略: block), family=" + std::to_string((int)name->sa_family) +
+                                       (addrStr.empty() ? "" : ", addr=" + addrStr));
+                    WSASetLastError(WSAEAFNOSUPPORT);
+                    return SOCKET_ERROR;
+                }
+            } else {
+                Core::Logger::Info("IPv6 连接已直连, family=" + std::to_string((int)name->sa_family) +
                                    (addrStr.empty() ? "" : ", addr=" + addrStr));
                 return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
             }
-            if (ipv6Mode != "proxy") {
-                // 强制阻止 IPv6，避免绕过代理
-                Core::Logger::Warn("已阻止 IPv6 连接(策略: block), family=" + std::to_string((int)name->sa_family) +
-                                   (addrStr.empty() ? "" : ", addr=" + addrStr));
-                WSASetLastError(WSAEAFNOSUPPORT);
-                return SOCKET_ERROR;
-            }
-        } else {
-            Core::Logger::Info("IPv6 连接已直连, family=" + std::to_string((int)name->sa_family) +
-                               (addrStr.empty() ? "" : ", addr=" + addrStr));
-            return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
         }
     } else if (name->sa_family != AF_INET) {
         std::string addrStr = SockaddrToString(name);
@@ -605,7 +732,24 @@ int WSAAPI DetourGetAddrInfo(PCSTR pNodeName, PCSTR pServiceName,
             uint32_t fakeIp = Network::FakeIP::Instance().Alloc(node);
             if (fakeIp != 0) {
                 std::string fakeIpStr = Network::FakeIP::IpToString(fakeIp);
-                return fpGetAddrInfo(fakeIpStr.c_str(), pServiceName, pHints, ppResult);
+
+                // 兼容仅请求 IPv6 结果的调用方：返回 v4-mapped IPv6，避免 getaddrinfo 因 family 不匹配直接失败
+                int family = pHints ? pHints->ai_family : AF_UNSPEC;
+                std::string fakeNode = fakeIpStr;
+                if (family == AF_INET6) {
+                    fakeNode = "::ffff:" + fakeIpStr;
+                } else if (family != AF_UNSPEC && family != AF_INET) {
+                    // 非预期 family：不改变原始语义，回退原始解析
+                    return fpGetAddrInfo(pNodeName, pServiceName, pHints, ppResult);
+                }
+
+                int rc = fpGetAddrInfo(fakeNode.c_str(), pServiceName, pHints, ppResult);
+                if (rc == 0) {
+                    return rc;
+                }
+                Core::Logger::Warn("FakeIP 回填 getaddrinfo 失败，回退原始解析, family=" + std::to_string(family) +
+                                   ", 错误码=" + std::to_string(rc) + ", host=" + node);
+                return fpGetAddrInfo(pNodeName, pServiceName, pHints, ppResult);
             }
             // FakeIP 达到上限时回退原始解析
         }
@@ -631,8 +775,25 @@ int WSAAPI DetourGetAddrInfoW(PCWSTR pNodeName, PCWSTR pServiceName,
             uint32_t fakeIp = Network::FakeIP::Instance().Alloc(nodeUtf8);
             if (fakeIp != 0) {
                 std::string fakeIpStr = Network::FakeIP::IpToString(fakeIp);
-                std::wstring fakeIpW = Utf8ToWide(fakeIpStr);
-                return fpGetAddrInfoW(fakeIpW.c_str(), pServiceName, pHints, ppResult);
+
+                // 兼容仅请求 IPv6 结果的调用方：返回 v4-mapped IPv6，避免 GetAddrInfoW 因 family 不匹配直接失败
+                int family = pHints ? pHints->ai_family : AF_UNSPEC;
+                std::string fakeNode = fakeIpStr;
+                if (family == AF_INET6) {
+                    fakeNode = "::ffff:" + fakeIpStr;
+                } else if (family != AF_UNSPEC && family != AF_INET) {
+                    // 非预期 family：不改变原始语义，回退原始解析
+                    return fpGetAddrInfoW(pNodeName, pServiceName, pHints, ppResult);
+                }
+
+                std::wstring fakeNodeW = Utf8ToWide(fakeNode);
+                int rc = fpGetAddrInfoW(fakeNodeW.c_str(), pServiceName, pHints, ppResult);
+                if (rc == 0) {
+                    return rc;
+                }
+                Core::Logger::Warn("FakeIP 回填 GetAddrInfoW 失败，回退原始解析, family=" + std::to_string(family) +
+                                   ", 错误码=" + std::to_string(rc) + ", host=" + nodeUtf8);
+                return fpGetAddrInfoW(pNodeName, pServiceName, pHints, ppResult);
             }
             // FakeIP 达到上限时回退原始解析
         }
@@ -759,17 +920,49 @@ int WSAAPI DetourWSAIoctl(
         GUID guid = *(GUID*)lpvInBuffer;
         if (IsEqualGUID(guid, WSAID_CONNECTEX)) {
             LPFN_CONNECTEX connectEx = *(LPFN_CONNECTEX*)lpvOutBuffer;
-            if (connectEx && !g_connectExHookInstalled) {
-                std::lock_guard<std::mutex> lock(g_connectExHookMtx);
-                if (!g_connectExHookInstalled) {
-                    if (MH_CreateHook((LPVOID)connectEx, (LPVOID)DetourConnectEx, (LPVOID*)&fpConnectEx) != MH_OK) {
-                        Core::Logger::Error("Hook ConnectEx 失败");
-                    } else if (MH_EnableHook((LPVOID)connectEx) != MH_OK) {
-                        Core::Logger::Error("启用 ConnectEx Hook 失败");
-                    } else {
-                        g_connectExHookInstalled = true;
-                        Core::Logger::Info("ConnectEx Hook 已安装");
+            if (connectEx) {
+                // ConnectEx 指针可能随 Provider 不同而不同：按 CatalogEntryId 去重安装
+                DWORD catalogId = 0;
+                const bool hasCatalog = TryGetSocketCatalogEntryId(s, &catalogId);
+
+                {
+                    std::lock_guard<std::mutex> lock(g_connectExHookMtx);
+                    if (hasCatalog) {
+                        if (g_connectExOriginalByCatalog.find(catalogId) != g_connectExOriginalByCatalog.end()) {
+                            return result; // 已安装过该 Provider 的 ConnectEx Hook
+                        }
+                    } else if (fpConnectEx) {
+                        return result; // 无法获取 Catalog 时，至少保证单 Provider 兜底已存在
                     }
+                }
+
+                std::lock_guard<std::mutex> lock(g_connectExHookMtx);
+                // 双重检查，避免并发重复安装
+                if (hasCatalog && g_connectExOriginalByCatalog.find(catalogId) != g_connectExOriginalByCatalog.end()) {
+                    return result;
+                }
+                if (!hasCatalog && fpConnectEx) {
+                    return result;
+                }
+
+                LPFN_CONNECTEX originalFn = nullptr;
+                if (MH_CreateHook((LPVOID)connectEx, (LPVOID)DetourConnectEx, (LPVOID*)&originalFn) != MH_OK) {
+                    Core::Logger::Error("Hook ConnectEx 失败");
+                } else if (MH_EnableHook((LPVOID)connectEx) != MH_OK) {
+                    Core::Logger::Error("启用 ConnectEx Hook 失败");
+                } else {
+                    if (hasCatalog) {
+                        g_connectExOriginalByCatalog[catalogId] = originalFn;
+                    }
+                    // 保留一个兜底 trampoline，兼容无法获取 Catalog 的极端场景
+                    if (!fpConnectEx) fpConnectEx = originalFn;
+                    std::string detail;
+                    if (hasCatalog) {
+                        detail += ", CatalogEntryId=" + std::to_string(catalogId);
+                    } else {
+                        detail += ", CatalogEntryId=未知";
+                    }
+                    Core::Logger::Info("ConnectEx Hook 已安装" + detail);
                 }
             }
         }
@@ -786,7 +979,9 @@ BOOL PASCAL DetourConnectEx(
     LPDWORD lpdwBytesSent,
     LPOVERLAPPED lpOverlapped
 ) {
-    if (!fpConnectEx) {
+    // ConnectEx trampoline 可能因 Provider 不同而不同，这里按 socket Provider 选择对应的原始实现
+    LPFN_CONNECTEX originalConnectEx = GetOriginalConnectExForSocket(s);
+    if (!originalConnectEx) {
         WSASetLastError(WSAEINVAL);
         return FALSE;
     }
@@ -809,29 +1004,44 @@ BOOL PASCAL DetourConnectEx(
     }
     
     auto& config = Core::Config::Instance();
+    LogRuntimeConfigSummaryOnce();
     Network::SocketWrapper sock(s);
     sock.SetTimeouts(config.timeout.recv_ms, config.timeout.send_ms);
     
+    // 仅对 TCP (SOCK_STREAM) 做代理，避免误伤 UDP/QUIC 等
+    if (config.proxy.port != 0 && !IsStreamSocket(s)) {
+        int soType = 0;
+        TryGetSocketType(s, &soType);
+        Core::Logger::Info("ConnectEx 非 SOCK_STREAM socket 直连, soType=" + std::to_string(soType));
+        return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+    }
+
     if (name->sa_family == AF_INET6) {
-        std::string addrStr = SockaddrToString(name);
-        if (config.proxy.port != 0) {
-            const std::string& ipv6Mode = config.rules.ipv6_mode;
-            if (ipv6Mode == "direct") {
-                Core::Logger::Info("ConnectEx IPv6 连接已直连(策略: direct), family=" + std::to_string((int)name->sa_family) +
+        const auto* addr6 = (const sockaddr_in6*)name;
+        const bool isV4Mapped = IN6_IS_ADDR_V4MAPPED(&addr6->sin6_addr);
+
+        // v4-mapped IPv6 本质是 IPv4 连接：不应被 ipv6_mode 误伤（否则会影响 FakeIP v4-mapped 回填）
+        if (!isV4Mapped) {
+            std::string addrStr = SockaddrToString(name);
+            if (config.proxy.port != 0) {
+                const std::string& ipv6Mode = config.rules.ipv6_mode;
+                if (ipv6Mode == "direct") {
+                    Core::Logger::Info("ConnectEx IPv6 连接已直连(策略: direct), family=" + std::to_string((int)name->sa_family) +
+                                       (addrStr.empty() ? "" : ", addr=" + addrStr));
+                    return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+                }
+                if (ipv6Mode != "proxy") {
+                    // 强制阻止 IPv6，避免绕过代理
+                    Core::Logger::Warn("ConnectEx 已阻止 IPv6 连接(策略: block), family=" + std::to_string((int)name->sa_family) +
+                                       (addrStr.empty() ? "" : ", addr=" + addrStr));
+                    WSASetLastError(WSAEAFNOSUPPORT);
+                    return FALSE;
+                }
+            } else {
+                Core::Logger::Info("ConnectEx IPv6 连接已直连, family=" + std::to_string((int)name->sa_family) +
                                    (addrStr.empty() ? "" : ", addr=" + addrStr));
-                return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+                return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
             }
-            if (ipv6Mode != "proxy") {
-                // 强制阻止 IPv6，避免绕过代理
-                Core::Logger::Warn("ConnectEx 已阻止 IPv6 连接(策略: block), family=" + std::to_string((int)name->sa_family) +
-                                   (addrStr.empty() ? "" : ", addr=" + addrStr));
-                WSASetLastError(WSAEAFNOSUPPORT);
-                return FALSE;
-            }
-        } else {
-            Core::Logger::Info("ConnectEx IPv6 连接已直连, family=" + std::to_string((int)name->sa_family) +
-                               (addrStr.empty() ? "" : ", addr=" + addrStr));
-            return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
         }
     } else if (name->sa_family != AF_INET) {
         std::string addrStr = SockaddrToString(name);
@@ -844,21 +1054,38 @@ BOOL PASCAL DetourConnectEx(
         }
         Core::Logger::Info("ConnectEx 非 IPv4/IPv6 连接已直连, family=" + std::to_string((int)name->sa_family) +
                            (addrStr.empty() ? "" : ", addr=" + addrStr));
-        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+        return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
     }
     
     std::string originalHost;
     uint16_t originalPort = 0;
     if (!ResolveOriginalTarget(name, &originalHost, &originalPort)) {
-        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+        return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
     }
     
     if (IsLoopbackHost(originalHost) || IsProxySelfTarget(originalHost, originalPort, config.proxy)) {
-        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+        return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
     }
     
     if (config.proxy.port == 0) {
-        return fpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+        return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+    }
+
+    // ============= 智能路由决策（与 PerformProxyConnect 保持一致） =============
+    // ROUTE-1: DNS 端口特殊处理 (解决 DNS 超时问题)
+    if (originalPort == 53) {
+        if (config.rules.dns_mode == "direct" || config.rules.dns_mode.empty()) {
+            Core::Logger::Info("ConnectEx DNS 请求直连 (策略: direct), 目标: " + originalHost + ":53");
+            return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+        }
+        // dns_mode == "proxy" 则继续走后面的代理逻辑
+        Core::Logger::Info("ConnectEx DNS 请求走代理 (策略: proxy), 目标: " + originalHost + ":53");
+    }
+
+    // ROUTE-2: 端口白名单过滤
+    if (!config.rules.IsPortAllowed(originalPort)) {
+        Core::Logger::Info("ConnectEx 端口 " + std::to_string(originalPort) + " 不在白名单, 直连: " + originalHost);
+        return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
     }
     
     Core::Logger::Info("ConnectEx 正重定向 " + originalHost + ":" + std::to_string(originalPort) + " 到代理");
@@ -871,16 +1098,16 @@ BOOL PASCAL DetourConnectEx(
             WSASetLastError(WSAEINVAL);
             return FALSE;
         }
-        result = fpConnectEx(s, (sockaddr*)&proxyAddr6, sizeof(proxyAddr6), NULL, 0,
-                             lpdwBytesSent ? lpdwBytesSent : &ignoredBytes, lpOverlapped);
+        result = originalConnectEx(s, (sockaddr*)&proxyAddr6, sizeof(proxyAddr6), NULL, 0,
+                                  lpdwBytesSent ? lpdwBytesSent : &ignoredBytes, lpOverlapped);
     } else {
         sockaddr_in proxyAddr{};
         if (!BuildProxyAddr(config.proxy, &proxyAddr, (sockaddr_in*)name)) {
             WSASetLastError(WSAEINVAL);
             return FALSE;
         }
-        result = fpConnectEx(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr), NULL, 0,
-                             lpdwBytesSent ? lpdwBytesSent : &ignoredBytes, lpOverlapped);
+        result = originalConnectEx(s, (sockaddr*)&proxyAddr, sizeof(proxyAddr), NULL, 0,
+                                  lpdwBytesSent ? lpdwBytesSent : &ignoredBytes, lpOverlapped);
     }
     if (!result) {
         int err = WSAGetLastError();
@@ -909,15 +1136,15 @@ BOOL PASCAL DetourConnectEx(
     }
     
     if (lpSendBuffer && dwSendDataLength > 0) {
-        int sent = fpSend ? fpSend(s, (const char*)lpSendBuffer, (int)dwSendDataLength, 0) : send(s, (const char*)lpSendBuffer, (int)dwSendDataLength, 0);
-        if (sent == SOCKET_ERROR) {
+        // 使用统一 SendAll，兼容非阻塞 socket / partial send
+        if (!Network::SocketIo::SendAll(s, (const char*)lpSendBuffer, (int)dwSendDataLength, config.timeout.send_ms)) {
             int err = WSAGetLastError();
             Core::Logger::Error("ConnectEx 发送首包失败, WSA错误码=" + std::to_string(err));
             WSASetLastError(err);
             return FALSE;
         }
         if (lpdwBytesSent) {
-            *lpdwBytesSent = (DWORD)sent;
+            *lpdwBytesSent = dwSendDataLength;
         }
     }
     
@@ -937,9 +1164,14 @@ BOOL WSAAPI DetourWSAGetOverlappedResult(
     }
     BOOL result = fpWSAGetOverlappedResult(s, lpOverlapped, lpcbTransfer, fWait, lpdwFlags);
     if (result && lpOverlapped) {
-        if (!HandleConnectExCompletion(lpOverlapped)) {
+        DWORD sentBytes = 0;
+        if (!HandleConnectExCompletion(lpOverlapped, &sentBytes)) {
             if (WSAGetLastError() == 0) WSASetLastError(WSAECONNREFUSED);
             return FALSE;
+        }
+        // ConnectEx 带首包时，原始返回的 lpcbTransfer 可能为 0，这里回填为实际发送字节数
+        if (sentBytes > 0 && lpcbTransfer) {
+            *lpcbTransfer = sentBytes;
         }
     } else if (!result && lpOverlapped) {
         int err = WSAGetLastError();
@@ -963,9 +1195,13 @@ BOOL WINAPI DetourGetQueuedCompletionStatus(
     }
     BOOL result = fpGetQueuedCompletionStatus(CompletionPort, lpNumberOfBytes, lpCompletionKey, lpOverlapped, dwMilliseconds);
     if (result && lpOverlapped && *lpOverlapped) {
-        if (!HandleConnectExCompletion(*lpOverlapped)) {
+        DWORD sentBytes = 0;
+        if (!HandleConnectExCompletion(*lpOverlapped, &sentBytes)) {
             if (GetLastError() == 0) SetLastError(WSAECONNREFUSED);
             return FALSE;
+        }
+        if (sentBytes > 0 && lpNumberOfBytes) {
+            *lpNumberOfBytes = sentBytes;
         }
     } else if (!result && lpOverlapped && *lpOverlapped) {
         DropConnectExContext(*lpOverlapped);
@@ -1002,12 +1238,17 @@ BOOL WINAPI DetourGetQueuedCompletionStatusEx(
             if (ovl) {
                 // 尝试处理 ConnectEx 完成握手
                 // 如果不是我们跟踪的 Overlapped，HandleConnectExCompletion 会直接返回 true
-                if (!HandleConnectExCompletion(ovl)) {
+                DWORD sentBytes = 0;
+                if (!HandleConnectExCompletion(ovl, &sentBytes)) {
                     // 握手失败，记录日志供调试
                     Core::Logger::Error("GetQueuedCompletionStatusEx: ConnectEx 握手失败");
                     // 握手失败时直接返回 FALSE，避免调用方误判为成功
                     if (GetLastError() == 0) SetLastError(WSAECONNREFUSED);
                     return FALSE;
+                }
+                if (sentBytes > 0) {
+                    // 回填 ConnectEx 首包发送字节数，提升与标准 ConnectEx 语义的一致性
+                    lpCompletionPortEntries[i].dwNumberOfBytesTransferred = sentBytes;
                 }
             }
         }
@@ -1286,6 +1527,12 @@ namespace Hooks {
             // 清理未完成的 ConnectEx 上下文，避免卸载后残留
             std::lock_guard<std::mutex> lock(g_connectExMtx);
             g_connectExPending.clear();
+        }
+        {
+            // 清理 ConnectEx Provider trampoline 映射，避免卸载后残留
+            std::lock_guard<std::mutex> lock(g_connectExHookMtx);
+            g_connectExOriginalByCatalog.clear();
+            fpConnectEx = NULL;
         }
         MH_DisableHook(MH_ALL_HOOKS);
         MH_Uninitialize();

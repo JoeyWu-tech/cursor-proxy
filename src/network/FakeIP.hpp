@@ -17,12 +17,35 @@ namespace Network {
         std::unordered_map<uint32_t, std::string> m_ipToDomain;  // IP(host order) -> Domain
         std::unordered_map<std::string, uint32_t> m_domainToIp;  // Domain -> IP(host order)
         std::mutex m_mtx;
+        std::once_flag m_initOnce; // 用于线程安全的延迟初始化（避免 m_initialized 数据竞争）
         
         uint32_t m_baseIp;      // 网段起始 IP (host order)
         uint32_t m_mask;        // 子网掩码 (host order)
         uint32_t m_networkSize; // 可用 IP 数量
         uint32_t m_cursor;      // 当前分配游标 (0 ~ networkSize-1)
-        bool m_initialized;
+
+        // 线程安全的一次性初始化：确保 Config 已加载后再读取 CIDR
+        void EnsureInitialized() {
+            std::call_once(m_initOnce, [this]() {
+                std::lock_guard<std::mutex> lock(m_mtx);
+
+                auto& config = Core::Config::Instance();
+                std::string cidr = config.fakeIp.cidr;
+                if (cidr.empty()) cidr = "198.18.0.0/15";
+
+                if (ParseCidr(cidr, m_baseIp, m_mask)) {
+                    m_networkSize = ~m_mask + 1; // e.g. /24 -> 256
+                    // 保留 .0 和最后一个地址（广播）? FakeIP 场景下通常都可以用，
+                    // 但为了规避某些系统行为，跳过第0个和最后一个是个好习惯。
+                    Core::Logger::Info("FakeIP: 初始化成功, CIDR=" + cidr +
+                                       ", 容量=" + std::to_string(m_networkSize));
+                } else {
+                    Core::Logger::Error("FakeIP: CIDR 解析失败 (" + cidr + ")，回退到 198.18.0.0/15");
+                    ParseCidr("198.18.0.0/15", m_baseIp, m_mask);
+                    m_networkSize = ~m_mask + 1;
+                }
+            });
+        }
 
         // CIDR 解析: "198.18.0.0/15" -> baseIp, mask
         bool ParseCidr(const std::string& cidr, uint32_t& outBase, uint32_t& outMask) {
@@ -49,44 +72,23 @@ namespace Network {
         }
 
     public:
-        FakeIP() : m_baseIp(0), m_mask(0), m_networkSize(0), m_cursor(1), m_initialized(false) {}
+        FakeIP() : m_baseIp(0), m_mask(0), m_networkSize(0), m_cursor(1) {}
         
         static FakeIP& Instance() {
             static FakeIP instance;
-            // 延迟初始化，确保 Config 已加载
-            if (!instance.m_initialized) {
-                instance.Init();
-            }
+            // 延迟初始化，确保 Config 已加载（线程安全）
+            instance.EnsureInitialized();
             return instance;
         }
         
         void Init() {
-            std::lock_guard<std::mutex> lock(m_mtx);
-            if (m_initialized) return;
-
-            auto& config = Core::Config::Instance();
-            std::string cidr = config.fakeIp.cidr;
-            if (cidr.empty()) cidr = "198.18.0.0/15";
-
-            if (ParseCidr(cidr, m_baseIp, m_mask)) {
-                m_networkSize = ~m_mask + 1; // e.g. /24 -> 256
-                // 保留 .0 和 .255 (广播) ? 在 FakeIP 场景下其实通常都可以用，
-                // 但为了规避某些系统行为，跳过第0个和最后一个是个好习惯。
-                // 简单起见，我们从 offset 1 开始使用。
-                
-                Core::Logger::Info("FakeIP: 初始化成功, CIDR=" + cidr + 
-                                   ", 容量=" + std::to_string(m_networkSize));
-            } else {
-                Core::Logger::Error("FakeIP: CIDR 解析失败 (" + cidr + ")，回退到 198.18.0.0/15");
-                ParseCidr("198.18.0.0/15", m_baseIp, m_mask);
-                m_networkSize = ~m_mask + 1;
-            }
-            m_initialized = true;
+            // 兼容旧调用：转为线程安全的一次性初始化
+            EnsureInitialized();
         }
 
         // 检查是否为虚拟 IP
         bool IsFakeIP(uint32_t ipNetworkOrder) {
-            if (!m_initialized) Init();
+            EnsureInitialized();
             uint32_t ip = ntohl(ipNetworkOrder);
             return (ip & m_mask) == m_baseIp;
         }
@@ -94,8 +96,8 @@ namespace Network {
         // 为域名分配虚拟 IP (Ring Buffer 策略)
         // 返回网络字节序 IP
         uint32_t Alloc(const std::string& domain) {
+            EnsureInitialized();
             std::lock_guard<std::mutex> lock(m_mtx);
-            if (!m_initialized) Init();
             
             // 1. 如果已存在映射，直接返回
             auto it = m_domainToIp.find(domain);
@@ -135,6 +137,7 @@ namespace Network {
         
         // 根据虚拟 IP 获取域名
         std::string GetDomain(uint32_t ipNetworkOrder) {
+            EnsureInitialized();
             std::lock_guard<std::mutex> lock(m_mtx);
             uint32_t ip = ntohl(ipNetworkOrder);
             
