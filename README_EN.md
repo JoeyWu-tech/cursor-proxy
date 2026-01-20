@@ -26,6 +26,7 @@
 
 - [📖 Introduction](#-introduction)
 - [⚡ Antigravity Quick Start](#-antigravity-quick-start)
+- [🔧 Troubleshooting Guide](#-troubleshooting-guide)
 - [✨ Features](#-features)
 - [🔧 How It Works](#-how-it-works)
 - [🛠️ Build](#️-build)
@@ -197,6 +198,199 @@ setx ANTIGRAVITY_HOME "%LOCALAPPDATA%\Programs\Antigravity"
 ```
 
 After that: PowerShell `cd $env:ANTIGRAVITY_HOME`, CMD `cd /d %ANTIGRAVITY_HOME%`.
+
+## 🔧 Troubleshooting Guide
+
+> Proxy not working? Follow this guide to diagnose and fix the issue.
+
+### 📋 Quick Diagnostic Flowchart
+
+```
+Proxy not working?
+    │
+    ├── Check if log file exists ─────────────────────────────────┐
+    │       │                                               │
+    │       ├── ❌ No log → DLL not loaded / wrong location    │
+    │       │       └── See "DLL Loading Issues"              │
+    │       │                                               │
+    │       └── ✅ Has log → Check log contents              │
+    │               │                                       │
+    ├── Does log contain "SOCKS5: Tunnel established"? ──────┤
+    │       │                                               │
+    │       ├── ❌ No → Proxy connection failed              │
+    │       │       └── See "Proxy Software Check"           │
+    │       │                                               │
+    │       └── ✅ Yes → Tunnel ok, issue is downstream      │
+    │               │                                       │
+    └── Check Clash logs and node availability ───────────────┘
+```
+
+---
+
+### 🔍 Step 1: Check Log Files
+
+Logs are your first source of debugging information.
+
+**Log Locations** (by priority):
+1. `<Antigravity Install Dir>\logs\proxy-YYYYMMDD.log`
+2. `%TEMP%\antigravity-proxy-logs\proxy-YYYYMMDD.log`
+
+**Quick Access**:
+```powershell
+# Open logs folder in DLL directory
+cd "$env:LOCALAPPDATA\Programs\Antigravity\logs"
+
+# Or open TEMP directory
+cd "$env:TEMP\antigravity-proxy-logs"
+```
+
+**Key Log Lines Explained**:
+
+| Log Content | Meaning | Status |
+|-------------|---------|--------|
+| `Antigravity-Proxy DLL loaded` | DLL successfully injected | ✅ OK |
+| `Config loaded successfully` | config.json read OK | ✅ OK |
+| `All API Hooks installed` | Hooks are active | ✅ OK |
+| `ConnectEx Hook installed` | Async connect hooked | ✅ OK |
+| `SOCKS5: Tunnel established` | Proxy connection OK | ✅ OK |
+| `Non-SOCK_STREAM socket direct, soType=2` | UDP traffic skipped (normal) | ⚠️ Expected |
+| `SOCKS5 handshake failed` | Proxy handshake failed | ❌ Check |
+| `Failed to connect proxy` | Cannot connect to proxy | ❌ Check |
+| `WSA Error=10061` | Connection refused (proxy not running) | ❌ Check |
+| `WSA Error=10060` | Connection timeout | ❌ Check |
+
+---
+
+### 🌐 Step 2: Proxy Software Check
+
+#### 2.1 Verify Proxy Port is Open
+
+```powershell
+# Test SOCKS5/mixed port
+Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
+
+# If TcpTestSucceeded: False, port is not listening
+```
+
+#### 2.2 Verify Clash Configuration
+
+Check in Clash config file:
+
+```yaml
+# Must enable mixed or SOCKS5 port
+mixed-port: 7890     # Mixed port (recommended)
+# Or
+port: 7890           # HTTP port
+socks-port: 7891     # SOCKS5 port
+
+# If LAN access is needed
+allow-lan: true
+```
+
+#### 2.3 Check Clash Logs
+
+In Clash UI, check "Logs" to confirm:
+- Requests from `daily-cloudcode-pa.googleapis.com`, `www.googleapis.com`
+- Whether requests go `DIRECT` or through proxy node
+- Whether any `REJECT` rules matched
+
+#### 2.4 Test Node Availability
+
+Simplest method: Enable **TUN mode**. If Antigravity works in TUN mode, your proxy node is fine.
+
+---
+
+### 💻 Step 3: System Environment Check
+
+#### 3.1 Check Windows Version
+
+```powershell
+winver
+```
+
+Different Windows 11 builds may have different Winsock behaviors.
+
+#### 3.2 Check Winsock LSP Configuration
+
+Some security software injects LSP (Layered Service Providers), which may interfere with hooks.
+
+```powershell
+# Run as Administrator
+netsh winsock show catalog
+```
+
+Normally you should only see Microsoft providers. Third-party providers (from 360, Huorong, etc.) may cause compatibility issues.
+
+#### 3.3 Check Security Software
+
+These may interfere with DLL injection or hooks:
+
+| Software | Possible Impact | Solution |
+|----------|----------------|----------|
+| **360 Security** | Blocks DLL injection, hooks | Add to whitelist or disable temporarily |
+| **Huorong** | May block remote thread injection | Add to whitelist |
+| **Tencent PC Manager** | LSP injection may interfere | Add to whitelist |
+| **Windows Defender** | Usually no interference | No action needed |
+
+**Troubleshooting tip**: Try completely exiting security software (not just minimizing to tray).
+
+#### 3.4 Check IPv6 Configuration
+
+If IPv6 is enabled, some connections may prefer IPv6:
+
+```powershell
+# Check network adapter IPv6 status
+Get-NetAdapterBinding -ComponentID ms_tcpip6
+```
+
+If logs show many IPv6-related entries, try setting in `config.json`:
+
+```json
+"proxy_rules": {
+    "ipv6_mode": "block"
+}
+```
+
+---
+
+### 🔄 Step 4: Comparison Check
+
+If your environment works but a friend's doesn't, compare these:
+
+| Item | Your Value | Their Value |
+|------|------------|-------------|
+| Windows version (winver) | | |
+| Clash version | | |
+| Proxy port | 7890 | |
+| Proxy type | socks5 | |
+| Security software installed | | |
+| `netsh winsock show catalog` line count | | |
+
+---
+
+### 📊 Step 5: Collect Info for GitHub Issue
+
+If the above steps don't resolve your issue, collect this info and submit a [GitHub Issue](https://github.com/yuaotian/antigravity-proxy/issues):
+
+1. **Log file**: Complete `proxy-YYYYMMDD.log` contents
+2. **config.json**: Your config file (hide sensitive info)
+3. **Windows version**: `winver` output
+4. **Clash version and config** (port settings)
+5. **Security software list**: Installed antivirus/security software
+6. **Problem description**: What exactly doesn't work? What site/feature fails?
+
+---
+
+### ⚠️ Known Compatibility Issues
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| **Many `Non-SOCK_STREAM socket direct, soType=2`** | UDP/QUIC traffic skipped (normal) | No action needed, SOCKS5 only proxies TCP |
+| **Log shows success but pages won't load** | Clash rules, node issues | Check Clash logs |
+| **Some requests bypass proxy** | App uses un-hooked APIs | Submit Issue for feedback |
+| **Fails with 360 and similar security software** | LSP injection interference | Add to whitelist or uninstall |
+
+---
 
 ## ✨ Features
 

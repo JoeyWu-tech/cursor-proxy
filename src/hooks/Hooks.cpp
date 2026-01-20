@@ -239,6 +239,17 @@ static void LogRuntimeConfigSummaryOnce() {
             ", child_injection=" + std::string(config.childInjection ? "开" : "关") +
             ", traffic_logging=" + std::string(config.trafficLogging ? "开" : "关")
         );
+        
+        // 增加系统环境信息，便于诊断不同环境下的兼容性问题
+        WSADATA wsaData{};
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) == 0) {
+            Core::Logger::Info("系统环境: Winsock版本=" + 
+                std::to_string(LOBYTE(wsaData.wVersion)) + "." + std::to_string(HIBYTE(wsaData.wVersion)) +
+                ", 最高版本=" + std::to_string(LOBYTE(wsaData.wHighVersion)) + "." + std::to_string(HIBYTE(wsaData.wHighVersion)) +
+                ", MaxSockets=" + std::to_string(wsaData.iMaxSockets) +
+                ", 描述=" + std::string(wsaData.szDescription));
+            WSACleanup();
+        }
     });
 }
 
@@ -531,10 +542,12 @@ static bool DoProxyHandshake(SOCKET s, const std::string& host, uint16_t port) {
 
     // 记录 socket -> 原始目标映射，便于在断开时输出可复盘日志
     RememberSocketTarget(s, host, port);
-    if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
-        Core::Logger::Debug("代理握手: 完成, sock=" + std::to_string((unsigned long long)s) +
-                            ", 目标=" + host + ":" + std::to_string(port));
-    }
+    
+    // 隧道就绪日志：始终打印，便于排查问题（如"隧道建立成功但后续不通"）
+    Core::Logger::Info("代理隧道就绪: sock=" + std::to_string((unsigned long long)s) +
+                       ", type=" + config.proxy.type +
+                       ", 代理=" + config.proxy.host + ":" + std::to_string(config.proxy.port) +
+                       ", 目标=" + host + ":" + std::to_string(port));
     return true;
 }
 

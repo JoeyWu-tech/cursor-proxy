@@ -26,6 +26,7 @@
 
 - [📖 项目介绍 / Introduction](#-项目介绍--introduction)
 - [⚡ Antigravity 快速开始 / Quick Start](#-antigravity-快速开始--quick-start)
+- [🔧 故障排查自查手册 / Troubleshooting Guide](#-故障排查自查手册--troubleshooting-guide)
 - [✨ 功能特性 / Features](#-功能特性--features)
 - [🔧 工作原理 / How It Works](#-工作原理--how-it-works)
 - [🛠️ 编译构建 / Build](#️-编译构建--build)
@@ -198,6 +199,199 @@ setx ANTIGRAVITY_HOME "%LOCALAPPDATA%\Programs\Antigravity"
 
 设置完后：PowerShell 用 `cd $env:ANTIGRAVITY_HOME`，CMD 用 `cd /d %ANTIGRAVITY_HOME%`。
 
+
+## 🔧 故障排查自查手册 / Troubleshooting Guide
+
+> 代理不工作？按照本手册逐步排查，找到问题根源。
+
+### 📋 快速诊断流程图
+
+```
+代理不工作？
+    │
+    ├── 检查日志是否存在 ───────────────────────────────────┐
+    │       │                                               │
+    │       ├── ❌ 无日志 → DLL未加载/位置错误               │
+    │       │       └── 见「DLL 加载问题」                   │
+    │       │                                               │
+    │       └── ✅ 有日志 → 继续检查日志内容                │
+    │               │                                       │
+    ├── 日志中有 "SOCKS5: 隧道建立成功" 吗？ ────────────────┤
+    │       │                                               │
+    │       ├── ❌ 没有 → 代理连接失败                      │
+    │       │       └── 见「代理软件排查」                   │
+    │       │                                               │
+    │       └── ✅ 有 → 隧道建立成功，问题在后续            │
+    │               │                                       │
+    └── 检查 Clash 日志和节点可用性 ──────────────────────────┘
+```
+
+---
+
+### 🔍 第一步：检查日志文件
+
+日志是排查问题的第一手资料。
+
+**日志位置**（按优先级）：
+1. `<Antigravity安装目录>\logs\proxy-YYYYMMDD.log`
+2. `%TEMP%\antigravity-proxy-logs\proxy-YYYYMMDD.log`
+
+**快速打开**：
+```powershell
+# 打开 DLL 目录的 logs 文件夹
+cd "$env:LOCALAPPDATA\Programs\Antigravity\logs"
+
+# 或打开 TEMP 目录
+cd "$env:TEMP\antigravity-proxy-logs"
+```
+
+**日志关键行解读**：
+
+| 日志内容 | 含义 | 状态 |
+|---------|------|------|
+| `Antigravity-Proxy DLL 已加载` | DLL 成功注入 | ✅ 正常 |
+| `配置加载成功` | config.json 读取成功 | ✅ 正常 |
+| `所有 API Hook 安装成功` | Hook 生效 | ✅ 正常 |
+| `ConnectEx Hook 已安装` | 异步连接 Hook 成功 | ✅ 正常 |
+| `SOCKS5: 隧道建立成功` | 代理连接成功 | ✅ 正常 |
+| `非 SOCK_STREAM socket 直连, soType=2` | UDP 流量被跳过（正常） | ⚠️ 预期行为 |
+| `SOCKS5 握手失败` | 代理握手失败 | ❌ 需排查 |
+| `连接代理服务器失败` | 无法连接到代理 | ❌ 需排查 |
+| `WSA错误码=10061` | 连接被拒绝（代理未启动） | ❌ 需排查 |
+| `WSA错误码=10060` | 连接超时 | ❌ 需排查 |
+
+---
+
+### 🌐 第二步：代理软件排查
+
+#### 2.1 确认代理端口可用
+
+```powershell
+# 测试 SOCKS5/混合端口
+Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
+
+# 如果 TcpTestSucceeded: False，说明端口未监听
+```
+
+#### 2.2 确认 Clash 配置正确
+
+在 Clash 配置文件中检查：
+
+```yaml
+# 必须开启混合端口或 SOCKS5 端口
+mixed-port: 7890     # 混合端口（推荐）
+# 或
+port: 7890           # HTTP 端口
+socks-port: 7891     # SOCKS5 端口
+
+# 如果需要局域网访问
+allow-lan: true
+```
+
+#### 2.3 检查 Clash 日志
+
+在 Clash 界面查看「日志」或「Logs」，确认：
+- 是否有来自 `daily-cloudcode-pa.googleapis.com`、`www.googleapis.com` 的请求
+- 请求是 `DIRECT`（直连）还是走了代理节点
+- 是否有 `REJECT` 规则命中
+
+#### 2.4 测试节点可用性
+
+最简单的方法：直接开启 **TUN 模式**，如果 TUN 模式下 Antigravity 正常，说明节点没问题。
+
+---
+
+### 💻 第三步：系统环境排查
+
+#### 3.1 检查 Windows 版本
+
+```powershell
+winver
+```
+
+不同 Windows 11 小版本的 Winsock 行为可能有差异。请记录版本号备用。
+
+#### 3.2 检查 Winsock LSP 配置
+
+某些安全软件会注入 LSP（分层服务提供程序），可能干扰 Hook。
+
+```powershell
+# 以管理员身份运行
+netsh winsock show catalog
+```
+
+正常情况下只应该有 Microsoft 的 Provider。如果看到第三方 Provider（如 360、火绒等），可能会有兼容性问题。
+
+#### 3.3 检查安全软件
+
+以下软件可能干扰 DLL 注入或 Hook：
+
+| 软件 | 可能的影响 | 解决方案 |
+|------|-----------|----------|
+| **360 安全卫士** | 拦截 DLL 注入、Hook | 添加白名单或临时关闭 |
+| **火绒安全** | 可能阻止远程线程注入 | 添加白名单 |
+| **腾讯电脑管家** | LSP 注入可能干扰网络 | 添加白名单 |
+| **Windows Defender** | 通常不干扰 | 无需处理 |
+
+**临时排查**：尝试完全退出安全软件后测试（不只是退到托盘，要完全退出）。
+
+#### 3.4 检查 IPv6 配置
+
+如果系统启用了 IPv6，某些连接可能尝试 IPv6 优先：
+
+```powershell
+# 查看网络适配器 IPv6 状态
+Get-NetAdapterBinding -ComponentID ms_tcpip6
+```
+
+如果日志中出现大量 IPv6 相关内容，可以尝试在 `config.json` 中设置：
+
+```json
+"proxy_rules": {
+    "ipv6_mode": "block"
+}
+```
+
+---
+
+### 🔄 第四步：对比排查（与正常环境对比）
+
+如果你的环境正常，但朋友的不行，请对比以下信息：
+
+| 对比项 | 你的值 | 对方的值 |
+|-------|--------|----------|
+| Windows 版本 (winver) | | |
+| Clash 版本 | | |
+| 代理端口 | 7890 | |
+| 代理类型 | socks5 | |
+| 是否有安全软件 | | |
+| `netsh winsock show catalog` 输出行数 | | |
+
+---
+
+### 📊 第五步：收集信息提交 Issue
+
+如果以上排查都无法解决，请收集以下信息提交 [GitHub Issue](https://github.com/yuaotian/antigravity-proxy/issues)：
+
+1. **日志文件**：完整的 `proxy-YYYYMMDD.log` 内容
+2. **config.json**：你的配置文件（隐藏敏感信息）
+3. **Windows 版本**：`winver` 输出
+4. **Clash 版本和配置**（端口设置部分）
+5. **安全软件列表**：已安装的杀软/安全软件
+6. **问题描述**：具体什么功能不工作？打开什么网站/功能时失败？
+
+---
+
+### ⚠️ 已知兼容性问题
+
+| 问题 | 原因 | 解决方案 |
+|------|------|----------|
+| **大量 `非 SOCK_STREAM socket 直连, soType=2`** | UDP/QUIC 流量被跳过（正常） | 无需处理，SOCKS5 仅代理 TCP |
+| **日志显示成功但网页打不开** | Clash 规则、节点问题 | 检查 Clash 日志 |
+| **某些请求绕过代理** | 应用使用了未 Hook 的 API | 提交 Issue 反馈 |
+| **360 等安全软件环境下失效** | LSP 注入干扰 | 添加白名单或卸载 |
+
+---
 
 ## ❓ DLL常见问题与错误码 / Common Errors and Error Codes
 

@@ -243,7 +243,9 @@ namespace Network {
             }
             
             Core::Logger::Info("SOCKS5: 隧道建立成功, sock=" + std::to_string((unsigned long long)sock) +
-                               ", 目标=" + targetHost + ":" + std::to_string(targetPort));
+                               ", 目标=" + targetHost + ":" + std::to_string(targetPort) +
+                               ", BND.ATYP=" + std::to_string(atyp) +
+                               ", BND.PORT=" + std::to_string((static_cast<uint16_t>(portBuf[0]) << 8) | portBuf[1]));
             return true;
         }
     };
