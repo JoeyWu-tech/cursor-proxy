@@ -77,12 +77,126 @@ jobs:
     needs: build
 
     steps:
+    # 检出仓库以获取 git 历史记录（生成发布说明需要）
+    - name: 检出仓库
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    # 基于 git 提交历史生成结构化发布说明
+    - name: 生成发布说明
+      id: changelog
+      shell: bash
+      run: |
+        set -e
+        CURRENT_TAG="${{ needs.build.outputs.release_tag }}"
+        
+        # 获取上一个 tag（排除当前 tag）
+        PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | grep -v "^${CURRENT_TAG}$" | head -n 1 || true)
+        
+        if [ -z "$PREV_TAG" ]; then
+          echo "首次发布，获取所有提交记录"
+          COMMIT_RANGE="HEAD"
+        else
+          echo "从 $PREV_TAG 到 $CURRENT_TAG 的提交"
+          COMMIT_RANGE="${PREV_TAG}..HEAD"
+        fi
+        
+        # 创建临时文件存储各类型提交
+        TMPDIR=$(mktemp -d)
+        for type in feat fix perf refactor docs chore style test build ci other; do
+          touch "$TMPDIR/$type.txt"
+        done
+        
+        # 获取提交列表，每行一个提交
+        git log $COMMIT_RANGE --pretty=format:'%h|%s' --no-merges 2>/dev/null | while IFS='|' read -r sha subject; do
+          [ -z "$sha" ] && continue
+          
+          # 获取该提交的 body
+          body=$(git log -1 --pretty=format:'%b' "$sha" 2>/dev/null | sed '/^$/d' || true)
+          
+          # 提取类型和范围，使用 grep + sed
+          if echo "$subject" | grep -qE '^[a-z]+(\([^)]+\))?:'; then
+            TYPE=$(echo "$subject" | sed -E 's/^([a-z]+)(\([^)]+\))?:.*/\1/')
+            SCOPE=$(echo "$subject" | sed -E 's/^[a-z]+(\([^)]+\))?:.*/\1/' | tr -d '()')
+            DESC=$(echo "$subject" | sed -E 's/^[a-z]+(\([^)]+\))?:[[:space:]]*//')
+            
+            # 格式化条目
+            if [ -n "$SCOPE" ] && [ "$SCOPE" != "$TYPE" ]; then
+              ENTRY="- **${SCOPE}**: ${DESC} (\`${sha}\`)"
+            else
+              ENTRY="- ${DESC} (\`${sha}\`)"
+            fi
+            
+            # 添加 body（如果有）
+            if [ -n "$body" ]; then
+              BODY_FORMATTED=$(echo "$body" | sed 's/^/  /')
+              ENTRY="${ENTRY}"$'\n'"${BODY_FORMATTED}"
+            fi
+            
+            # 写入对应类型文件
+            case "$TYPE" in
+              feat)     echo "$ENTRY" >> "$TMPDIR/feat.txt" ;;
+              fix)      echo "$ENTRY" >> "$TMPDIR/fix.txt" ;;
+              perf)     echo "$ENTRY" >> "$TMPDIR/perf.txt" ;;
+              refactor) echo "$ENTRY" >> "$TMPDIR/refactor.txt" ;;
+              docs)     echo "$ENTRY" >> "$TMPDIR/docs.txt" ;;
+              chore)    echo "$ENTRY" >> "$TMPDIR/chore.txt" ;;
+              style)    echo "$ENTRY" >> "$TMPDIR/style.txt" ;;
+              test)     echo "$ENTRY" >> "$TMPDIR/test.txt" ;;
+              build)    echo "$ENTRY" >> "$TMPDIR/build.txt" ;;
+              ci)       echo "$ENTRY" >> "$TMPDIR/ci.txt" ;;
+              *)        echo "$ENTRY" >> "$TMPDIR/other.txt" ;;
+            esac
+          else
+            # 非标准格式提交
+            echo "- ${subject} (\`${sha}\`)" >> "$TMPDIR/other.txt"
+          fi
+        done
+        
+        # 构建最终的发布说明
+        CHANGELOG=""
+        
+        add_section() {
+          local file="$1"
+          local title="$2"
+          if [ -s "$file" ]; then
+            CHANGELOG="${CHANGELOG}${title}"$'\n\n'
+            CHANGELOG="${CHANGELOG}$(cat "$file")"$'\n\n'
+          fi
+        }
+        
+        add_section "$TMPDIR/feat.txt"     "## ✨ 新功能 (Features)"
+        add_section "$TMPDIR/fix.txt"      "## 🐛 Bug 修复 (Bug Fixes)"
+        add_section "$TMPDIR/perf.txt"     "## ⚡ 性能优化 (Performance)"
+        add_section "$TMPDIR/refactor.txt" "## ♻️ 代码重构 (Refactoring)"
+        add_section "$TMPDIR/docs.txt"     "## 📝 文档更新 (Documentation)"
+        add_section "$TMPDIR/build.txt"    "## 📦 构建相关 (Build)"
+        add_section "$TMPDIR/ci.txt"       "## 👷 CI 配置 (CI)"
+        add_section "$TMPDIR/chore.txt"    "## 🔧 杂项 (Chores)"
+        add_section "$TMPDIR/style.txt"    "## 💄 代码风格 (Style)"
+        add_section "$TMPDIR/test.txt"     "## ✅ 测试 (Tests)"
+        add_section "$TMPDIR/other.txt"    "## 📋 其他更新 (Other)"
+        
+        # 清理临时目录
+        rm -rf "$TMPDIR"
+        
+        # 如果没有任何提交记录
+        [ -z "$CHANGELOG" ] && CHANGELOG="暂无更新记录"
+        
+        # 使用 heredoc 写入多行输出（GitHub Actions 推荐方式）
+        {
+          echo "body<<EOF"
+          echo "$CHANGELOG"
+          echo "EOF"
+        } >> $GITHUB_OUTPUT
+
     - name: 下载打包文件
       uses: actions/download-artifact@v4
       with:
         path: release-assets
 
-    # 创建/更新 Release，并上传打包产物与自动生成发布说明
+    # 创建/更新 Release，上传打包产物并使用生成的发布说明
     - name: 发布 GitHub Release
       uses: softprops/action-gh-release@v2
       with:
@@ -90,4 +204,4 @@ jobs:
         name: ${{ needs.build.outputs.release_tag }}
         target_commitish: ${{ github.sha }}
         files: release-assets/**/*.zip
-        generate_release_notes: true
+        body: ${{ steps.changelog.outputs.body }}
