@@ -43,6 +43,11 @@ namespace Core {
         // "direct" - IPv6 直连
         // "block"  - 阻止 IPv6 连接
         std::string ipv6_mode = "proxy";
+
+        // UDP 处理策略
+        // "block"  - 阻断 UDP（默认，国内必须代理场景下可强制回退 TCP，避免 QUIC/HTTP3 绕过代理）
+        // "direct" - UDP 直连（保持现状）
+        std::string udp_mode = "block";
         
         // 快速判断端口是否在白名单中
         bool IsPortAllowed(uint16_t port) const {
@@ -251,6 +256,12 @@ namespace Core {
                                    rules.ipv6_mode.begin(),
                                    [](unsigned char c) { return (char)std::tolower(c); });
                     if (rules.ipv6_mode.empty()) rules.ipv6_mode = "proxy";
+                    // 解析 UDP 策略，统一为小写，避免大小写导致配置失效
+                    rules.udp_mode = pr.value("udp_mode", "block");
+                    std::transform(rules.udp_mode.begin(), rules.udp_mode.end(),
+                                   rules.udp_mode.begin(),
+                                   [](unsigned char c) { return (char)std::tolower(c); });
+                    if (rules.udp_mode.empty()) rules.udp_mode = "block";
                 }
                 // 配置校验：限制策略枚举取值，避免拼写错误导致绕过预期逻辑
                 if (rules.dns_mode != "direct" && rules.dns_mode != "proxy") {
@@ -261,8 +272,13 @@ namespace Core {
                     Logger::Warn("配置: proxy_rules.ipv6_mode 无效(" + rules.ipv6_mode + ")，已回退为 proxy (可选: proxy/direct/block)");
                     rules.ipv6_mode = "proxy";
                 }
-                Logger::Info("路由规则: allowed_ports=" + std::to_string(rules.allowed_ports.size()) + 
+                if (rules.udp_mode != "block" && rules.udp_mode != "direct") {
+                    Logger::Warn("配置: proxy_rules.udp_mode 无效(" + rules.udp_mode + ")，已回退为 block (可选: block/direct)");
+                    rules.udp_mode = "block";
+                }
+                Logger::Info("路由规则: allowed_ports=" + std::to_string(rules.allowed_ports.size()) +
                              " 项, dns_mode=" + rules.dns_mode + ", ipv6_mode=" + rules.ipv6_mode +
+                             ", udp_mode=" + rules.udp_mode +
                              (hasProxyRules ? "" : " (默认)"));
 
 

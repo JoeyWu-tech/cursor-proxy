@@ -277,6 +277,7 @@ $configJson = @{
         allowed_ports = @(80, 443)
         dns_mode = "direct"
         ipv6_mode = "proxy"
+        udp_mode = "block"
     }
 } | ConvertTo-Json -Depth 4
 
@@ -290,7 +291,7 @@ Write-Success "配置文件已生成: $configPath"
 
 Write-Step "生成使用说明..."
 
-$usageDoc = @"
+$usageDoc = @'
 # Antigravity-Proxy 使用说明
 
 ## 概述
@@ -332,7 +333,8 @@ Antigravity-Proxy 是一个基于 MinHook 的 Windows DLL 代理注入工具。
     "proxy_rules": {
         "allowed_ports": [80, 443], // 端口白名单 (仅这些端口走代理, 空=全部)
         "dns_mode": "direct",       // DNS策略: direct(直连) 或 proxy(走代理)
-        "ipv6_mode": "proxy"        // IPv6策略: proxy(走代理) / direct(直连) / block(阻止)
+        "ipv6_mode": "proxy",       // IPv6策略: proxy(走代理) / direct(直连) / block(阻止)
+        "udp_mode": "block"         // UDP策略: block(默认, 阻断UDP以强制回退TCP) / direct(直连)
     }
 }
 ``````
@@ -379,6 +381,7 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
 | proxy_rules.allowed_ports | 端口白名单 (空=全部) | [80, 443] |
 | proxy_rules.dns_mode | DNS策略 (direct/proxy) | direct |
 | proxy_rules.ipv6_mode | IPv6策略 (proxy/direct/block) | proxy |
+| proxy_rules.udp_mode | UDP策略 (block/direct) | block |
 
 ## v1.1.0 更新说明
 
@@ -386,9 +389,11 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
 1. **目标进程过滤**: 可配置 `target_processes` 数组，仅对指定进程注入 DLL
 2. **回环地址 bypass**: `127.0.0.1`、`localhost` 等本地地址不再走代理
 3. **日志中文化**: 所有日志已统一为中文输出
-4. **智能路由规则**: 新增 `proxy_rules` 配置，支持端口白名单和 DNS 策略
+4. **智能路由规则**: 新增 `proxy_rules` 配置，支持端口白名单、DNS/IPv6/UDP 策略
    - `allowed_ports`: 仅指定端口走代理，其他直连
    - `dns_mode`: DNS (53端口) 可选直连或走代理
+   - `ipv6_mode`: IPv6 可选走代理/直连/阻止
+   - `udp_mode`: UDP 可选直连或阻断（默认阻断以强制回退 TCP，避免 QUIC/HTTP3 绕过代理）
 
 ### 配置示例
 ```json
@@ -464,7 +469,7 @@ A: 这是技术限制，请参考上述"WSL 环境说明"使用替代方案。
 ---
 GitHub: https://github.com/yuaotian/antigravity-proxy
 关注公众号「煎饼果子卷AI」获取最新动态
-"@
+'@
 
 $usagePath = Join-Path $OutputDir "使用说明.md"
 $usageDoc | Out-File -FilePath $usagePath -Encoding UTF8

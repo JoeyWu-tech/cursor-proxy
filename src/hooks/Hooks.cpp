@@ -10,6 +10,7 @@
 #include <mswsock.h>
 #include <unordered_map>
 #include <mutex>
+#include <atomic>
 #include "../core/Config.hpp"
 #include "../core/Logger.hpp"
 #include "../network/SocketWrapper.hpp"
@@ -28,10 +29,12 @@ typedef int (WSAAPI *getaddrinfo_t)(PCSTR, PCSTR, const ADDRINFOA*, PADDRINFOA*)
 typedef int (WSAAPI *getaddrinfoW_t)(PCWSTR, PCWSTR, const ADDRINFOW*, PADDRINFOW*);
 typedef int (WSAAPI *send_t)(SOCKET, const char*, int, int);
 typedef int (WSAAPI *recv_t)(SOCKET, char*, int, int);
+typedef int (WSAAPI *sendto_t)(SOCKET, const char*, int, int, const struct sockaddr*, int);
 typedef int (WSAAPI *closesocket_t)(SOCKET);
 typedef int (WSAAPI *shutdown_t)(SOCKET, int);
 typedef int (WSAAPI *WSASend_t)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 typedef int (WSAAPI *WSARecv_t)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+typedef int (WSAAPI *WSASendTo_t)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, const struct sockaddr*, int, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 typedef BOOL (WSAAPI *WSAConnectByNameA_t)(SOCKET, LPCSTR, LPCSTR, LPDWORD, LPSOCKADDR, LPDWORD, LPSOCKADDR, const struct timeval*, LPWSAOVERLAPPED);
 typedef BOOL (WSAAPI *WSAConnectByNameW_t)(SOCKET, LPWSTR, LPWSTR, LPDWORD, LPSOCKADDR, LPDWORD, LPSOCKADDR, const struct timeval*, LPWSAOVERLAPPED);
 typedef int (WSAAPI *WSAIoctl_t)(SOCKET, DWORD, LPVOID, DWORD, LPVOID, DWORD, LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
@@ -56,10 +59,12 @@ getaddrinfo_t fpGetAddrInfo = NULL;
 getaddrinfoW_t fpGetAddrInfoW = NULL;
 send_t fpSend = NULL;
 recv_t fpRecv = NULL;
+sendto_t fpSendTo = NULL;
 closesocket_t fpCloseSocket = NULL;
 shutdown_t fpShutdown = NULL;
 WSASend_t fpWSASend = NULL;
 WSARecv_t fpWSARecv = NULL;
+WSASendTo_t fpWSASendTo = NULL;
 WSAConnectByNameA_t fpWSAConnectByNameA = NULL;
 WSAConnectByNameW_t fpWSAConnectByNameW = NULL;
 WSAIoctl_t fpWSAIoctl = NULL;
@@ -127,6 +132,8 @@ static std::mutex g_connectExMtx;
 static std::mutex g_connectExHookMtx;
 // ConnectEx 在不同 Provider 下可能返回不同函数指针，这里按 CatalogEntryId 记录各自的 trampoline
 static std::unordered_map<DWORD, LPFN_CONNECTEX> g_connectExOriginalByCatalog;
+// ConnectEx 目标函数指针可能被多个 Provider 复用，这里按“目标函数地址”记录 trampoline，便于复用与补全 Catalog 映射
+static std::unordered_map<void*, LPFN_CONNECTEX> g_connectExTrampolineByTarget;
 static const ULONGLONG kConnectExPendingTtlMs = 60000; // 超过 60 秒的上下文视为过期
 
 // 为了避免日志被大量非目标进程淹没，这里仅首次记录“跳过注入”的进程名
@@ -233,6 +240,7 @@ static void LogRuntimeConfigSummaryOnce() {
             ", cidr=" + config.fakeIp.cidr +
             ", dns_mode=" + (config.rules.dns_mode.empty() ? "(空)" : config.rules.dns_mode) +
             ", ipv6_mode=" + (config.rules.ipv6_mode.empty() ? "(空)" : config.rules.ipv6_mode) +
+            ", udp_mode=" + (config.rules.udp_mode.empty() ? "(空)" : config.rules.udp_mode) +
             ", allowed_ports=" + ports +
             ", timeout(connect/send/recv)=" + std::to_string(config.timeout.connect_ms) + "/" + std::to_string(config.timeout.send_ms) + "/" +
                 std::to_string(config.timeout.recv_ms) +
@@ -345,6 +353,57 @@ static std::string SockaddrToString(const sockaddr* addr) {
         return std::string(buf) + ":" + std::to_string(ntohs(addr6->sin6_port));
     }
     return "";
+}
+
+// 从 sockaddr 提取端口（仅用于策略判断/日志；失败时返回 false）
+static bool TryGetSockaddrPort(const sockaddr* addr, uint16_t* outPort) {
+    if (!outPort) return false;
+    *outPort = 0;
+    if (!addr) return false;
+    if (addr->sa_family == AF_INET) {
+        const auto* addr4 = (const sockaddr_in*)addr;
+        *outPort = ntohs(addr4->sin_port);
+        return true;
+    }
+    if (addr->sa_family == AF_INET6) {
+        const auto* addr6 = (const sockaddr_in6*)addr;
+        *outPort = ntohs(addr6->sin6_port);
+        return true;
+    }
+    return false;
+}
+
+// 判断 sockaddr 是否为回环地址（127.0.0.0/8 或 ::1 或 v4-mapped 127.0.0.0/8）
+static bool IsSockaddrLoopback(const sockaddr* addr) {
+    if (!addr) return false;
+    if (addr->sa_family == AF_INET) {
+        const auto* addr4 = (const sockaddr_in*)addr;
+        const uint32_t ip = ntohl(addr4->sin_addr.s_addr);
+        return ((ip >> 24) == 127);
+    }
+    if (addr->sa_family == AF_INET6) {
+        const auto* addr6 = (const sockaddr_in6*)addr;
+        if (IN6_IS_ADDR_LOOPBACK(&addr6->sin6_addr)) return true;
+        if (IN6_IS_ADDR_V4MAPPED(&addr6->sin6_addr)) {
+            in_addr addr4{};
+            const unsigned char* raw = reinterpret_cast<const unsigned char*>(&addr6->sin6_addr);
+            memcpy(&addr4, raw + 12, sizeof(addr4));
+            const uint32_t ip = ntohl(addr4.s_addr);
+            return ((ip >> 24) == 127);
+        }
+    }
+    return false;
+}
+
+// UDP 强阻断策略会触发大量重试（尤其是 QUIC），这里做简单限流，避免日志/IO 影响性能
+static bool ShouldLogUdpBlock() {
+    static std::atomic<int> s_logCount{0};
+    const int n = s_logCount.fetch_add(1, std::memory_order_relaxed);
+    if (n < 20) return true; // 仅前 20 次输出详细阻断日志
+    if (n == 20) {
+        Core::Logger::Warn("UDP 阻断日志过多，后续将仅在 [调试] 级别输出（避免 QUIC 重试导致日志/性能问题）");
+    }
+    return Core::Logger::IsEnabled(Core::LogLevel::Debug);
 }
 
 // 从 socket 读取当前端点信息（仅用于日志；失败时返回空字符串）
@@ -664,8 +723,43 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
     if (config.proxy.port != 0 && !IsStreamSocket(s)) {
         int soType = 0;
         TryGetSocketType(s, &soType);
-        Core::Logger::Info("非 SOCK_STREAM socket 直连, sock=" + std::to_string((unsigned long long)s) +
-                           ", soType=" + std::to_string(soType));
+
+        // UDP 强阻断：默认阻断 UDP（除 DNS/loopback 例外），强制应用回退到 TCP 再走代理
+        // 设计意图：解决国内环境 QUIC/HTTP3(UDP) 绕过代理导致“看似已建隧道但仍不可用”的问题。
+        if (soType == SOCK_DGRAM && config.rules.udp_mode == "block") {
+            uint16_t dstPort = 0;
+            const bool hasPort = TryGetSockaddrPort(name, &dstPort);
+            const bool allowUdp = IsSockaddrLoopback(name) || (hasPort && dstPort == 53);
+            if (!allowUdp) {
+                const int err = WSAENETUNREACH;
+                if (ShouldLogUdpBlock()) {
+                    const std::string api = isWsa ? "WSAConnect" : "connect";
+                    const std::string dst = SockaddrToString(name);
+                    Core::Logger::Warn(api + ": 已阻止 UDP 连接(策略: udp_mode=block), sock=" + std::to_string((unsigned long long)s) +
+                                       (dst.empty() ? "" : ", dst=" + dst) +
+                                       (hasPort ? (", port=" + std::to_string(dstPort)) : std::string("")) +
+                                       ", WSA错误码=" + std::to_string(err));
+                }
+                WSASetLastError(err);
+                return SOCKET_ERROR;
+            }
+            if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
+                const std::string dst = SockaddrToString(name);
+                Core::Logger::Debug(std::string(isWsa ? "WSAConnect" : "connect") +
+                                    ": UDP 直连已放行(例外), sock=" + std::to_string((unsigned long long)s) +
+                                    (dst.empty() ? "" : ", dst=" + dst));
+            }
+            return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
+        }
+
+        // 其他非 SOCK_STREAM 类型保持直连；仅在 Debug 下记录，避免刷屏影响性能
+        if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
+            const std::string dst = SockaddrToString(name);
+            Core::Logger::Debug(std::string(isWsa ? "WSAConnect" : "connect") +
+                                ": 非 SOCK_STREAM 直连, sock=" + std::to_string((unsigned long long)s) +
+                                ", soType=" + std::to_string(soType) +
+                                (dst.empty() ? "" : ", dst=" + dst));
+        }
         return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
     }
 
@@ -1122,33 +1216,57 @@ int WSAAPI DetourWSAIoctl(
                 // ConnectEx 指针可能随 Provider 不同而不同：按 CatalogEntryId 去重安装
                 DWORD catalogId = 0;
                 const bool hasCatalog = TryGetSocketCatalogEntryId(s, &catalogId);
+                void* targetKey = (void*)connectEx;
 
+                std::lock_guard<std::mutex> lock(g_connectExHookMtx);
+
+                // 已安装过该 Provider 的 ConnectEx Hook
+                if (hasCatalog) {
+                    auto it = g_connectExOriginalByCatalog.find(catalogId);
+                    if (it != g_connectExOriginalByCatalog.end() && it->second) {
+                        return result;
+                    }
+                } else if (fpConnectEx) {
+                    // 无法获取 Catalog 时，至少保证单 Provider 兜底已存在
+                    return result;
+                }
+
+                // 如果该 ConnectEx 目标指针已被 Hook，则复用 trampoline 并补全 Catalog 映射（解决多 Provider 环境缺口）
                 {
-                    std::lock_guard<std::mutex> lock(g_connectExHookMtx);
-                    if (hasCatalog) {
-                        if (g_connectExOriginalByCatalog.find(catalogId) != g_connectExOriginalByCatalog.end()) {
-                            return result; // 已安装过该 Provider 的 ConnectEx Hook
+                    auto itTarget = g_connectExTrampolineByTarget.find(targetKey);
+                    if (itTarget != g_connectExTrampolineByTarget.end() && itTarget->second) {
+                        if (hasCatalog) {
+                            g_connectExOriginalByCatalog[catalogId] = itTarget->second;
                         }
-                    } else if (fpConnectEx) {
-                        return result; // 无法获取 Catalog 时，至少保证单 Provider 兜底已存在
+                        if (!fpConnectEx) fpConnectEx = itTarget->second;
+                        std::string detail = hasCatalog ? (", CatalogEntryId=" + std::to_string(catalogId)) : ", CatalogEntryId=未知";
+                        Core::Logger::Info("ConnectEx Hook 已复用" + detail);
+                        return result;
                     }
                 }
 
-                std::lock_guard<std::mutex> lock(g_connectExHookMtx);
-                // 双重检查，避免并发重复安装
-                if (hasCatalog && g_connectExOriginalByCatalog.find(catalogId) != g_connectExOriginalByCatalog.end()) {
-                    return result;
-                }
-                if (!hasCatalog && fpConnectEx) {
-                    return result;
-                }
-
                 LPFN_CONNECTEX originalFn = nullptr;
-                if (MH_CreateHook((LPVOID)connectEx, (LPVOID)DetourConnectEx, (LPVOID*)&originalFn) != MH_OK) {
+                MH_STATUS st = MH_CreateHook((LPVOID)connectEx, (LPVOID)DetourConnectEx, (LPVOID*)&originalFn);
+                if (st == MH_ERROR_ALREADY_CREATED) {
+                    // 目标指针已存在 Hook（并发/复用场景），尝试复用已记录 trampoline
+                    auto itTarget = g_connectExTrampolineByTarget.find(targetKey);
+                    if (itTarget != g_connectExTrampolineByTarget.end() && itTarget->second) {
+                        if (hasCatalog) {
+                            g_connectExOriginalByCatalog[catalogId] = itTarget->second;
+                        }
+                        if (!fpConnectEx) fpConnectEx = itTarget->second;
+                        std::string detail = hasCatalog ? (", CatalogEntryId=" + std::to_string(catalogId)) : ", CatalogEntryId=未知";
+                        Core::Logger::Info("ConnectEx Hook 已复用" + detail);
+                    } else {
+                        std::string detail = hasCatalog ? (", CatalogEntryId=" + std::to_string(catalogId)) : ", CatalogEntryId=未知";
+                        Core::Logger::Warn("ConnectEx Hook 已存在但无法复用 trampoline" + detail);
+                    }
+                } else if (st != MH_OK) {
                     Core::Logger::Error("Hook ConnectEx 失败");
                 } else if (MH_EnableHook((LPVOID)connectEx) != MH_OK) {
                     Core::Logger::Error("启用 ConnectEx Hook 失败");
                 } else {
+                    g_connectExTrampolineByTarget[targetKey] = originalFn;
                     if (hasCatalog) {
                         g_connectExOriginalByCatalog[catalogId] = originalFn;
                     }
@@ -1219,8 +1337,40 @@ BOOL PASCAL DetourConnectEx(
     if (config.proxy.port != 0 && !IsStreamSocket(s)) {
         int soType = 0;
         TryGetSocketType(s, &soType);
-        Core::Logger::Info("ConnectEx 非 SOCK_STREAM socket 直连, sock=" + std::to_string((unsigned long long)s) +
-                           ", soType=" + std::to_string(soType));
+
+        // UDP 强阻断：默认阻断 UDP（除 DNS/loopback 例外），强制应用回退到 TCP 再走代理
+        // 说明：ConnectEx 理论上主要用于 TCP，但部分运行库可能复用接口，这里保持策略一致。
+        if (soType == SOCK_DGRAM && config.rules.udp_mode == "block") {
+            uint16_t dstPort = 0;
+            const bool hasPort = TryGetSockaddrPort(name, &dstPort);
+            const bool allowUdp = IsSockaddrLoopback(name) || (hasPort && dstPort == 53);
+            if (!allowUdp) {
+                const int err = WSAENETUNREACH;
+                if (ShouldLogUdpBlock()) {
+                    const std::string dst = SockaddrToString(name);
+                    Core::Logger::Warn("ConnectEx: 已阻止 UDP 连接(策略: udp_mode=block), sock=" + std::to_string((unsigned long long)s) +
+                                       (dst.empty() ? "" : ", dst=" + dst) +
+                                       (hasPort ? (", port=" + std::to_string(dstPort)) : std::string("")) +
+                                       ", WSA错误码=" + std::to_string(err));
+                }
+                WSASetLastError(err);
+                return FALSE;
+            }
+            if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
+                const std::string dst = SockaddrToString(name);
+                Core::Logger::Debug("ConnectEx: UDP 直连已放行(例外), sock=" + std::to_string((unsigned long long)s) +
+                                    (dst.empty() ? "" : ", dst=" + dst));
+            }
+            return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+        }
+
+        // 其他非 SOCK_STREAM 类型保持直连；仅在 Debug 下记录，避免刷屏影响性能
+        if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
+            const std::string dst = SockaddrToString(name);
+            Core::Logger::Debug("ConnectEx: 非 SOCK_STREAM 直连, sock=" + std::to_string((unsigned long long)s) +
+                                ", soType=" + std::to_string(soType) +
+                                (dst.empty() ? "" : ", dst=" + dst));
+        }
         return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
     }
 
@@ -1627,6 +1777,97 @@ int WSAAPI DetourWSARecv(
     return result;
 }
 
+// ============= UDP 强阻断: sendto / WSASendTo Hook =============
+
+int WSAAPI DetourSendTo(SOCKET s, const char* buf, int len, int flags, const struct sockaddr* to, int tolen) {
+    if (!fpSendTo) {
+        WSASetLastError(WSAEINVAL);
+        return SOCKET_ERROR;
+    }
+
+    auto& config = Core::Config::Instance();
+    if (config.proxy.port != 0 && config.rules.udp_mode == "block") {
+        int soType = 0;
+        if (TryGetSocketType(s, &soType) && soType == SOCK_DGRAM) {
+            sockaddr_storage peer{};
+            int peerLen = (int)sizeof(peer);
+            const sockaddr* dst = to;
+            if (!dst) {
+                if (getpeername(s, (sockaddr*)&peer, &peerLen) == 0) {
+                    dst = (sockaddr*)&peer;
+                }
+            }
+
+            uint16_t dstPort = 0;
+            const bool hasPort = TryGetSockaddrPort(dst, &dstPort);
+            const bool allowUdp = dst && (IsSockaddrLoopback(dst) || (hasPort && dstPort == 53));
+            if (!allowUdp) {
+                const int err = WSAENETUNREACH;
+                if (ShouldLogUdpBlock()) {
+                    const std::string dstStr = dst ? SockaddrToString(dst) : std::string("(未知)");
+                    Core::Logger::Warn("sendto: 已阻止 UDP 发送(策略: udp_mode=block), sock=" + std::to_string((unsigned long long)s) +
+                                       ", dst=" + dstStr +
+                                       (hasPort ? (", port=" + std::to_string(dstPort)) : std::string("")) +
+                                       ", WSA错误码=" + std::to_string(err));
+                }
+                WSASetLastError(err);
+                return SOCKET_ERROR;
+            }
+        }
+    }
+
+    return fpSendTo(s, buf, len, flags, to, tolen);
+}
+
+int WSAAPI DetourWSASendTo(
+    SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
+    LPDWORD lpNumberOfBytesSent, DWORD dwFlags,
+    const struct sockaddr* lpTo, int iToLen,
+    LPWSAOVERLAPPED lpOverlapped,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
+) {
+    if (!fpWSASendTo) {
+        WSASetLastError(WSAEINVAL);
+        return SOCKET_ERROR;
+    }
+
+    auto& config = Core::Config::Instance();
+    if (config.proxy.port != 0 && config.rules.udp_mode == "block") {
+        int soType = 0;
+        if (TryGetSocketType(s, &soType) && soType == SOCK_DGRAM) {
+            sockaddr_storage peer{};
+            int peerLen = (int)sizeof(peer);
+            const sockaddr* dst = lpTo;
+            if (!dst) {
+                if (getpeername(s, (sockaddr*)&peer, &peerLen) == 0) {
+                    dst = (sockaddr*)&peer;
+                }
+            }
+
+            uint16_t dstPort = 0;
+            const bool hasPort = TryGetSockaddrPort(dst, &dstPort);
+            const bool allowUdp = dst && (IsSockaddrLoopback(dst) || (hasPort && dstPort == 53));
+            if (!allowUdp) {
+                const int err = WSAENETUNREACH;
+                if (lpNumberOfBytesSent) {
+                    *lpNumberOfBytesSent = 0;
+                }
+                if (ShouldLogUdpBlock()) {
+                    const std::string dstStr = dst ? SockaddrToString(dst) : std::string("(未知)");
+                    Core::Logger::Warn("WSASendTo: 已阻止 UDP 发送(策略: udp_mode=block), sock=" + std::to_string((unsigned long long)s) +
+                                       ", dst=" + dstStr +
+                                       (hasPort ? (", port=" + std::to_string(dstPort)) : std::string("")) +
+                                       ", WSA错误码=" + std::to_string(err));
+                }
+                WSASetLastError(err);
+                return SOCKET_ERROR;
+            }
+        }
+    }
+
+    return fpWSASendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpTo, iToLen, lpOverlapped, lpCompletionRoutine);
+}
+
 // ============= Hook 管理 =============
 
 namespace Hooks {
@@ -1745,6 +1986,16 @@ namespace Hooks {
                              (LPVOID)DetourWSARecv, (LPVOID*)&fpWSARecv) != MH_OK) {
             Core::Logger::Error("Hook WSARecv 失败");
         }
+
+        // Hook sendto / WSASendTo（UDP 强阻断：阻止 QUIC/HTTP3 等绕过代理）
+        if (MH_CreateHookApi(L"ws2_32.dll", "sendto",
+                             (LPVOID)DetourSendTo, (LPVOID*)&fpSendTo) != MH_OK) {
+            Core::Logger::Error("Hook sendto 失败");
+        }
+        if (MH_CreateHookApi(L"ws2_32.dll", "WSASendTo",
+                             (LPVOID)DetourWSASendTo, (LPVOID*)&fpWSASendTo) != MH_OK) {
+            Core::Logger::Error("Hook WSASendTo 失败");
+        }
         
         if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
             Core::Logger::Error("启用 Hooks 失败");
@@ -1768,6 +2019,7 @@ namespace Hooks {
             // 清理 ConnectEx Provider trampoline 映射，避免卸载后残留
             std::lock_guard<std::mutex> lock(g_connectExHookMtx);
             g_connectExOriginalByCatalog.clear();
+            g_connectExTrampolineByTarget.clear();
             fpConnectEx = NULL;
         }
         MH_DisableHook(MH_ALL_HOOKS);
