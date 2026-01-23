@@ -25,6 +25,16 @@
 - **触发**: 大量不同进程名创建
 - **修复**: 设置最大条目数或定期清理
 
+### ~~TD-008: IOCP 完成事件状态检查缺失~~ ✅ 已修复
+- **文件**: `src/hooks/Hooks.cpp` (`DetourGetQueuedCompletionStatusEx`, `DetourGetQueuedCompletionStatus`)
+- **问题**: ~~未检查 `OVERLAPPED_ENTRY.Internal` (NTSTATUS)，连接失败时仍尝试握手~~
+- **状态**: **已修复** (2026-01-23)
+- **修复说明**: 
+  - 检查 IOCP 完成状态，STATUS_SUCCESS=0 才执行握手
+  - 连接失败时清理上下文并跳过（不阻断整个批次）
+  - 在 `DoProxyHandshake` 添加 `getpeername()` 预检
+  - 修复 `FakeIP::IsFakeIP()` 潜在 data race（加锁）
+
 ---
 
 ## 🟡 中严重程度 (Medium Priority)

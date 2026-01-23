@@ -35,6 +35,11 @@ namespace Network {
 
                 if (ParseCidr(cidr, m_baseIp, m_mask)) {
                     m_networkSize = ~m_mask + 1; // e.g. /24 -> 256
+                    // FIX-4: 边界检查 - 网段过小会导致分配失败或频繁回绕
+                    if (m_networkSize <= 2) {
+                        Core::Logger::Warn("FakeIP: CIDR 网段过小 (容量=" + std::to_string(m_networkSize) + 
+                                           ")，建议使用 /24 或更大网段");
+                    }
                     // 保留 .0 和最后一个地址（广播）? FakeIP 场景下通常都可以用，
                     // 但为了规避某些系统行为，跳过第0个和最后一个是个好习惯。
                     Core::Logger::Info("FakeIP: 初始化成功, CIDR=" + cidr +
@@ -86,9 +91,10 @@ namespace Network {
             EnsureInitialized();
         }
 
-        // 检查是否为虚拟 IP
+        // FIX-3: 检查是否为虚拟 IP（加锁保护，避免与初始化/分配操作产生 data race）
         bool IsFakeIP(uint32_t ipNetworkOrder) {
             EnsureInitialized();
+            std::lock_guard<std::mutex> lock(m_mtx);
             uint32_t ip = ntohl(ipNetworkOrder);
             return (ip & m_mask) == m_baseIp;
         }

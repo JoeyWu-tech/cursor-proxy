@@ -571,6 +571,18 @@ static bool ResolveNameToAddr(const std::string& node, const std::string& servic
 }
 
 static bool DoProxyHandshake(SOCKET s, const std::string& host, uint16_t port) {
+    // FIX-2: 预检确保 socket 已成功连接到代理服务器，避免在未连接的 socket 上发送数据
+    sockaddr_storage peerAddr{};
+    int peerLen = sizeof(peerAddr);
+    if (getpeername(s, (sockaddr*)&peerAddr, &peerLen) != 0) {
+        int err = WSAGetLastError();
+        Core::Logger::Error("代理握手: socket 未连接, sock=" + std::to_string((unsigned long long)s) +
+                            ", 目标=" + host + ":" + std::to_string(port) +
+                            ", WSA错误码=" + std::to_string(err));
+        WSASetLastError(WSAENOTCONN);
+        return false;
+    }
+
     auto& config = Core::Config::Instance();
     if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
         Core::Logger::Debug("代理握手: 开始, sock=" + std::to_string((unsigned long long)s) +
@@ -1566,10 +1578,12 @@ BOOL WINAPI DetourGetQueuedCompletionStatus(
     }
     BOOL result = fpGetQueuedCompletionStatus(CompletionPort, lpNumberOfBytes, lpCompletionKey, lpOverlapped, dwMilliseconds);
     if (result && lpOverlapped && *lpOverlapped) {
+        // FIX-1: 单事件版本 - result=TRUE 表示 IOCP 操作成功
         DWORD sentBytes = 0;
         if (!HandleConnectExCompletion(*lpOverlapped, &sentBytes)) {
-            if (GetLastError() == 0) SetLastError(WSAECONNREFUSED);
-            return FALSE;
+            // 握手失败：记录日志，但不返回 FALSE（DoProxyHandshake 内部会设置合适的错误码）
+            Core::Logger::Error("GetQueuedCompletionStatus: ConnectEx 握手失败");
+            // FIX-1: 不再返回 FALSE，让调用方根据后续 I/O 判断连接状态
         }
         if (sentBytes > 0 && lpNumberOfBytes) {
             *lpNumberOfBytes = sentBytes;
@@ -1603,24 +1617,36 @@ BOOL WINAPI DetourGetQueuedCompletionStatusEx(
     );
     
     if (result && lpCompletionPortEntries && ulNumEntriesRemoved && *ulNumEntriesRemoved > 0) {
-        // 遍历所有完成的事件，检查是否有待处理的 ConnectEx 上下文
+        // FIX-1: 遍历所有完成的事件，检查 IOCP 完成状态后再处理
         for (ULONG i = 0; i < *ulNumEntriesRemoved; i++) {
             LPOVERLAPPED ovl = lpCompletionPortEntries[i].lpOverlapped;
-            if (ovl) {
-                // 尝试处理 ConnectEx 完成握手
-                // 如果不是我们跟踪的 Overlapped，HandleConnectExCompletion 会直接返回 true
-                DWORD sentBytes = 0;
-                if (!HandleConnectExCompletion(ovl, &sentBytes)) {
-                    // 握手失败，记录日志供调试
-                    Core::Logger::Error("GetQueuedCompletionStatusEx: ConnectEx 握手失败");
-                    // 握手失败时直接返回 FALSE，避免调用方误判为成功
-                    if (GetLastError() == 0) SetLastError(WSAECONNREFUSED);
-                    return FALSE;
+            if (!ovl) continue;
+            
+            // FIX-1: 检查 IOCP 完成状态（Internal 字段存储 NTSTATUS，本质是 LONG）
+            // STATUS_SUCCESS = 0，非零表示操作失败（如连接被拒绝、超时等）
+            // 注意：Internal 字段在 OVERLAPPED_ENTRY 中类型为 ULONG_PTR
+            LONG ioStatus = (LONG)lpCompletionPortEntries[i].Internal;
+            if (ioStatus != 0) {
+                // 连接失败：清理上下文，继续处理下一个事件（不阻断整个批次）
+                if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
+                    Core::Logger::Debug("GetQueuedCompletionStatusEx: IOCP 事件失败, status=" + 
+                                        std::to_string(ioStatus) + ", 跳过握手");
                 }
-                if (sentBytes > 0) {
-                    // 回填 ConnectEx 首包发送字节数，提升与标准 ConnectEx 语义的一致性
-                    lpCompletionPortEntries[i].dwNumberOfBytesTransferred = sentBytes;
-                }
+                DropConnectExContext(ovl);
+                continue;
+            }
+            
+            // 连接成功：尝试处理 ConnectEx 完成握手
+            // 如果不是我们跟踪的 Overlapped，HandleConnectExCompletion 会直接返回 true
+            DWORD sentBytes = 0;
+            if (!HandleConnectExCompletion(ovl, &sentBytes)) {
+                // 握手失败：记录日志，但不返回 FALSE（避免影响其他连接）
+                Core::Logger::Error("GetQueuedCompletionStatusEx: ConnectEx 握手失败");
+                // FIX-1: 继续处理下一个事件，不阻断整个批次
+            }
+            if (sentBytes > 0) {
+                // 回填 ConnectEx 首包发送字节数，提升与标准 ConnectEx 语义的一致性
+                lpCompletionPortEntries[i].dwNumberOfBytesTransferred = sentBytes;
             }
         }
     } else if (!result && lpCompletionPortEntries && ulNumEntriesRemoved && *ulNumEntriesRemoved > 0) {
