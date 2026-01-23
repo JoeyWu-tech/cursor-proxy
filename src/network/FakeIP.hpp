@@ -6,6 +6,12 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <sstream>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <cstring>
+#include <cstdint>
 #include "../core/Config.hpp"
 #include "../core/Logger.hpp"
 
@@ -23,6 +29,116 @@ namespace Network {
         uint32_t m_mask;        // 子网掩码 (host order)
         uint32_t m_networkSize; // 可用 IP 数量
         uint32_t m_cursor;      // 当前分配游标 (0 ~ networkSize-1)
+
+        // ============= 跨进程共享映射（最佳努力） =============
+        static constexpr uint32_t kSharedMagic = 0x4650494D; // "FIPM"
+        static constexpr uint32_t kSharedCapacity = 4096;
+        static constexpr size_t kSharedDomainMax = 255;
+        static constexpr const char* kSharedMapName = "Local\\AntigravityProxy_FakeIP_Map";
+        static constexpr const char* kSharedMutexName = "Local\\AntigravityProxy_FakeIP_Mutex";
+
+        struct SharedEntry {
+            uint32_t ip;       // host order
+            uint64_t tick;     // 最近写入时间（GetTickCount64）
+            char domain[kSharedDomainMax + 1];
+        };
+
+        struct SharedTable {
+            uint32_t magic;
+            uint32_t capacity;
+            uint32_t cursor;
+            uint32_t reserved;
+            SharedEntry entries[kSharedCapacity];
+        };
+
+        HANDLE m_sharedMap = NULL;
+        HANDLE m_sharedMutex = NULL;
+        SharedTable* m_shared = nullptr;
+        std::once_flag m_sharedOnce;
+
+        bool LockShared() {
+            if (!m_sharedMutex) return false;
+            DWORD wait = WaitForSingleObject(m_sharedMutex, INFINITE);
+            return (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED);
+        }
+
+        void UnlockShared() {
+            if (m_sharedMutex) ReleaseMutex(m_sharedMutex);
+        }
+
+        void EnsureSharedInitialized() {
+            std::call_once(m_sharedOnce, [this]() {
+                m_sharedMutex = CreateMutexA(NULL, FALSE, kSharedMutexName);
+                const bool locked = LockShared();
+
+                m_sharedMap = CreateFileMappingA(
+                    INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
+                    static_cast<DWORD>(sizeof(SharedTable)), kSharedMapName
+                );
+                if (!m_sharedMap) {
+                    if (locked) UnlockShared();
+                    return;
+                }
+                DWORD mapErr = GetLastError();
+                m_shared = (SharedTable*)MapViewOfFile(m_sharedMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedTable));
+                if (!m_shared) {
+                    CloseHandle(m_sharedMap);
+                    m_sharedMap = NULL;
+                    if (locked) UnlockShared();
+                    return;
+                }
+
+                const bool needInit = (mapErr != ERROR_ALREADY_EXISTS) ||
+                                      (m_shared->magic != kSharedMagic) ||
+                                      (m_shared->capacity != kSharedCapacity);
+                if (needInit) {
+                    std::memset(m_shared, 0, sizeof(SharedTable));
+                    m_shared->magic = kSharedMagic;
+                    m_shared->capacity = kSharedCapacity;
+                    m_shared->cursor = 0;
+                }
+
+                if (locked) UnlockShared();
+            });
+        }
+
+        void SharedPut(uint32_t ipHostOrder, const std::string& domain) {
+            if (domain.empty()) return;
+            EnsureSharedInitialized();
+            if (!m_shared) return;
+            if (!LockShared()) return;
+            uint32_t idx = m_shared->cursor++ % kSharedCapacity;
+            SharedEntry& entry = m_shared->entries[idx];
+            entry.ip = ipHostOrder;
+            entry.tick = GetTickCount64();
+            std::memset(entry.domain, 0, sizeof(entry.domain));
+            const size_t n = (domain.size() < kSharedDomainMax) ? domain.size() : kSharedDomainMax;
+            if (n > 0) {
+                std::memcpy(entry.domain, domain.data(), n);
+                entry.domain[n] = '\0';
+            }
+            UnlockShared();
+        }
+
+        std::string SharedGet(uint32_t ipHostOrder) {
+            EnsureSharedInitialized();
+            if (!m_shared) return "";
+            if (!LockShared()) return "";
+            const SharedEntry* best = nullptr;
+            uint64_t bestTick = 0;
+            for (uint32_t i = 0; i < kSharedCapacity; i++) {
+                const SharedEntry& entry = m_shared->entries[i];
+                if (entry.ip == ipHostOrder && entry.domain[0] != '\0') {
+                    if (entry.tick >= bestTick) {
+                        bestTick = entry.tick;
+                        best = &entry;
+                    }
+                }
+            }
+            std::string result = best ? std::string(best->domain) : "";
+            UnlockShared();
+            return result;
+        }
 
         // 线程安全的一次性初始化：确保 Config 已加载后再读取 CIDR
         void EnsureInitialized() {
@@ -145,6 +261,9 @@ namespace Network {
             // 4. 建立新映射
             m_ipToDomain[newIp] = domain;
             m_domainToIp[domain] = newIp;
+
+            // 同步写入跨进程共享映射，降低多进程 miss 概率
+            SharedPut(newIp, domain);
             
             if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
                 Core::Logger::Debug("FakeIP: 分配 " + IpToString(htonl(newIp)) + " -> " + domain);
@@ -164,6 +283,17 @@ namespace Network {
                     Core::Logger::Debug("FakeIP: 查询命中 " + IpToString(ipNetworkOrder) + " -> " + it->second);
                 }
                 return it->second;
+            }
+
+            // 本进程未命中时，尝试从跨进程共享映射回填
+            std::string sharedDomain = SharedGet(ip);
+            if (!sharedDomain.empty()) {
+                m_ipToDomain[ip] = sharedDomain;
+                m_domainToIp[sharedDomain] = ip;
+                if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
+                    Core::Logger::Debug("FakeIP: 共享映射命中 " + IpToString(ipNetworkOrder) + " -> " + sharedDomain);
+                }
+                return sharedDomain;
             }
 
             // 如果是 FakeIP 网段内地址但查不到，通常意味着已回收/未分配或上下文不一致

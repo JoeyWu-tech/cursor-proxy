@@ -656,10 +656,31 @@ static void DropConnectExContext(LPOVERLAPPED ovl) {
     g_connectExPending.erase(ovl);
 }
 
+// ConnectEx 连接完成后更新上下文，避免 send 报 WSAENOTCONN
+static bool UpdateConnectExContext(SOCKET s) {
+    if (setsockopt(s, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0) != 0) {
+        int err = WSAGetLastError();
+        Core::Logger::Warn("ConnectEx: 更新连接上下文失败, sock=" + std::to_string((unsigned long long)s) +
+                           ", WSA错误码=" + std::to_string(err));
+    }
+    int soErr = 0;
+    int soErrLen = sizeof(soErr);
+    if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&soErr, &soErrLen) == 0 && soErr != 0) {
+        Core::Logger::Error("ConnectEx: 连接状态异常, sock=" + std::to_string((unsigned long long)s) +
+                            ", SO_ERROR=" + std::to_string(soErr));
+        WSASetLastError(soErr);
+        return false;
+    }
+    return true;
+}
+
 static bool HandleConnectExCompletion(LPOVERLAPPED ovl, DWORD* outSentBytes) {
     if (outSentBytes) *outSentBytes = 0;
     ConnectExContext ctx{};
     if (!PopConnectExContext(ovl, &ctx)) return true;
+    if (!UpdateConnectExContext(ctx.sock)) {
+        return false;
+    }
     if (!DoProxyHandshake(ctx.sock, ctx.host, ctx.port)) {
         return false;
     }
@@ -1512,6 +1533,9 @@ BOOL PASCAL DetourConnectEx(
         return FALSE;
     }
     
+    if (!UpdateConnectExContext(s)) {
+        return FALSE;
+    }
     if (!DoProxyHandshake(s, originalHost, originalPort)) {
         return FALSE;
     }

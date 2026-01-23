@@ -62,6 +62,11 @@ if (result && lpCompletionPortEntries && ulNumEntriesRemoved && *ulNumEntriesRem
 6. Socket 未连接 → 发送数据失败 → **WSAENOTCONN (10057)**
 7. `return FALSE` 导致后续健康连接也被中断 → 进程崩溃
 
+**补充链路（FakeIP 未命中场景）**：
+1. `fake_ip=false` 或跨进程缓存导致 `198.18.*.*` 进入连接流程
+2. `FakeIP::GetDomain()` 未命中 → 目标退化为 `198.18.*.*`
+3. 代理握手使用保留网段目标 → 连接失败/崩溃
+
 ### 2.3 FakeIP 与问题的关联
 
 FakeIP **不是直接原因**，而是触发条件：
@@ -81,6 +86,8 @@ FakeIP **不是直接原因**，而是触发条件：
 | FIX-2 | Hooks.cpp | socket 连接状态预检 | 🟡 中 |
 | FIX-3 | FakeIP.hpp | `IsFakeIP()` 加锁 | 🟢 低 |
 | FIX-4 | FakeIP.hpp | 边界网段防御检查 | 🟢 低 |
+| FIX-5 | Hooks.cpp | ConnectEx 更新连接上下文 | 🔴 高 |
+| FIX-6 | FakeIP.hpp | 跨进程共享映射（降低 miss） | 🟡 中 |
 
 ---
 
@@ -194,12 +201,62 @@ if (m_networkSize <= 2) {
 
 ---
 
+### 3.6 FIX-5：ConnectEx 更新连接上下文
+
+**位置**：`src/hooks/Hooks.cpp`，`HandleConnectExCompletion` 与 `DetourConnectEx`
+
+**目的**：ConnectEx 完成后更新 socket 连接上下文，降低 `WSAENOTCONN` 风险。
+
+**修改内容（示意）**：
+
+```cpp
+static bool UpdateConnectExContext(SOCKET s) {
+    if (setsockopt(s, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0) != 0) {
+        int err = WSAGetLastError();
+        Core::Logger::Warn("ConnectEx: 更新连接上下文失败, sock=" + std::to_string((unsigned long long)s) +
+                           ", WSA错误码=" + std::to_string(err));
+    }
+    int soErr = 0;
+    int soErrLen = sizeof(soErr);
+    if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&soErr, &soErrLen) == 0 && soErr != 0) {
+        Core::Logger::Error("ConnectEx: 连接状态异常, sock=" + std::to_string((unsigned long long)s) +
+                            ", SO_ERROR=" + std::to_string(soErr));
+        WSASetLastError(soErr);
+        return false;
+    }
+    return true;
+}
+
+// 在 ConnectEx 完成后（同步/异步）先 Update，再握手
+```
+
+---
+
+### 3.7 FIX-6：跨进程共享 FakeIP 映射（降低 miss）
+
+**位置**：`src/network/FakeIP.hpp`
+
+**目的**：避免“解析在 A 进程、连接在 B 进程”的 FakeIP 未命中。
+
+**修改内容（示意）**：
+
+```cpp
+// 共享内存 + 命名互斥
+CreateFileMappingA(INVALID_HANDLE_VALUE, ..., "Local\\AntigravityProxy_FakeIP_Map");
+CreateMutexA(NULL, FALSE, "Local\\AntigravityProxy_FakeIP_Mutex");
+
+// Alloc 时写入共享表；GetDomain 未命中时尝试回填
+```
+
+---
+
 ## 四、技术债务更新
 
 修复完成后，需更新 `docs/TECH_DEBT.md`：
 
 - 将 TD-001 (FakeIP 映射表无限增长) 标记为 ✅ 已修复（已完成）
 - 新增 TD-008 (IOCP 状态检查缺失) 标记为 ✅ 已修复
+- 新增 TD-009 (FakeIP 跨进程映射缺失) 标记为 ✅ 已修复
 
 ---
 
@@ -212,6 +269,8 @@ if (m_networkSize <= 2) {
 3. **连接失败恢复**：代理服务器短暂不可用后恢复正常
 4. **高并发**：多个并发连接不会相互阻断
 5. **关闭 FakeIP**：`fake_ip.enabled = false` 时行为不变
+6. **跨进程**：父进程解析、子进程连接仍能命中域名
+7. **FakeIP miss**：日志出现 `FakeIP: 查询未命中` 时不再导致全局崩溃
 
 ---
 
