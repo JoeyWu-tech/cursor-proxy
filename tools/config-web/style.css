@@ -1,0 +1,239 @@
+:root {
+  --bg: #0f1115;
+  --panel: #161a22;
+  --panel-light: #1b2030;
+  --accent: #f59e0b;
+  --accent-2: #38bdf8;
+  --text: #e6e9f2;
+  --muted: #9aa3b2;
+  --danger: #ef4444;
+  --shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Source Han Sans SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--text);
+  background: radial-gradient(1200px 800px at 10% -10%, #1f2937 0%, #0f1115 60%),
+              radial-gradient(800px 600px at 90% 10%, #172554 0%, #0f1115 55%);
+  min-height: 100vh;
+}
+
+.hero {
+  padding: 40px 6vw 20px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.hero-content {
+  max-width: 620px;
+}
+
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--accent-2);
+  font-size: 12px;
+}
+
+h1 {
+  margin: 8px 0 10px;
+  font-size: clamp(28px, 4vw, 40px);
+}
+
+.subtitle {
+  color: var(--muted);
+  margin: 0;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.file-button {
+  position: relative;
+  overflow: hidden;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: var(--panel-light);
+  cursor: pointer;
+  border: 1px solid #262c3e;
+}
+
+.file-button input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+button {
+  border: none;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: var(--panel-light);
+  color: var(--text);
+  cursor: pointer;
+  border: 1px solid #262c3e;
+}
+
+button.primary {
+  background: linear-gradient(135deg, var(--accent), #f97316);
+  color: #0b0f14;
+  border: none;
+}
+
+button.ghost {
+  background: transparent;
+}
+
+button.danger {
+  background: transparent;
+  border-color: rgba(239, 68, 68, 0.6);
+  color: var(--danger);
+}
+
+.layout {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 0 6vw 40px;
+}
+
+.panel {
+  background: var(--panel);
+  border-radius: 20px;
+  padding: 20px;
+  box-shadow: var(--shadow);
+  border: 1px solid #262c3e;
+}
+
+.panel h2 {
+  margin: 0 0 16px;
+  font-size: 20px;
+}
+
+.grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+.grid.two {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.field input,
+.field textarea,
+.field select {
+  background: #0f131b;
+  border: 1px solid #273049;
+  color: var(--text);
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 14px;
+}
+
+.warning {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fcd34d;
+  min-height: 44px;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(320px, 2fr);
+  gap: 20px;
+}
+
+.rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rule-list-header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rule-list-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+#ruleList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+
+#ruleList li {
+  background: #0f131b;
+  border: 1px solid #273049;
+  padding: 10px 12px;
+  border-radius: 12px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+#ruleList li.active {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.3);
+}
+
+.rule-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.result {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #0f131b;
+  border: 1px solid #273049;
+  min-height: 44px;
+  color: var(--accent-2);
+}
+
+.footer {
+  padding: 20px 6vw 40px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
+  .split {
+    grid-template-columns: 1fr;
+  }
+}
