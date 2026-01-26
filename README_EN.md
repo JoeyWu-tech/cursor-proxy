@@ -706,6 +706,12 @@ Routing rules live under `proxy_rules.routing`. They support CIDR, wildcard doma
 ```
 
 **Config tool**: `tools/config-web/index.html` (open locally to import/edit/export `config.json`).
+**Note**: `AUTHORS.txt` lists contributors of the bundled MinHook dependency, not this project’s maintainers.
+
+**Notes**:
+- Leave ports empty to match all ports. Leave domains empty to match CIDR only. `*` matches all domains.
+- Use `0.0.0.0/0` and `::/0` for full match.
+- The tool supports editing `proxy.host` / `proxy.port` / `proxy.type`.
 
 
 ### Verification

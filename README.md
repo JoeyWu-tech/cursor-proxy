@@ -732,6 +732,12 @@ target_link_libraries(version PRIVATE ws2_32)
 ```
 
 **可视化配置工具**：`tools/config-web/index.html`（本地打开即可使用，支持导入/编辑/导出 `config.json`）。
+**说明**：`AUTHORS.txt` 为内嵌的 MinHook 依赖作者名单，并非本项目维护者列表。
+
+**提示**：
+- 端口留空代表“全部端口”；域名留空仅按 CIDR 匹配；域名填 `*` 将匹配所有域名。
+- 全量匹配可用 `0.0.0.0/0` 与 `::/0`。
+- 工具已支持 `proxy.host` / `proxy.port` / `proxy.type` 的编辑。
 
 
 ### IPv6 注意事项
