@@ -671,6 +671,43 @@ Launch the target application, done! 🎉
 | `traffic_logging` | bool | `false` | Enable traffic logging |
 | `target_processes` | array | `[]` | Target process list (empty = all) |
 
+| `proxy_rules.routing.enabled` | bool | `true` | Enable rule-based routing |
+| `proxy_rules.routing.priority_mode` | string | `"order"` | Priority: `order`(list order) / `number`(priority) |
+| `proxy_rules.routing.default_action` | string | `"proxy"` | Default action when no rule matches |
+| `proxy_rules.routing.use_default_private` | bool | `true` | Auto-load RFC1918/loopback direct rules |
+| `proxy_rules.routing.rules` | array | `[]` | Rule list (CIDR / wildcard domain / port / protocol) |
+
+### Routing Rules
+
+Routing rules live under `proxy_rules.routing`. They support CIDR, wildcard domains, ports, and protocol filters. Priority can be `order` (list order) or `number` (priority).
+
+```json
+{
+  "proxy_rules": {
+    "routing": {
+      "enabled": true,
+      "priority_mode": "order",
+      "default_action": "proxy",
+      "use_default_private": true,
+      "rules": [
+        {
+          "name": "lan-direct",
+          "action": "direct",
+          "ip_cidrs_v4": ["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"],
+          "ip_cidrs_v6": ["fc00::/7","fe80::/10","::1/128"],
+          "domains": [".local","*.corp.example.com"],
+          "ports": ["445","3389","10000-20000"],
+          "protocols": ["tcp"]
+        }
+      ]
+    }
+  }
+}
+```
+
+**Config tool**: `tools/config-web/index.html` (open locally to import/edit/export `config.json`).
+
+
 ### Verification
 
 1. **Check logs**: Look for `proxy.log` in the target application directory

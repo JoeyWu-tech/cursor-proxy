@@ -697,6 +697,43 @@ target_link_libraries(version PRIVATE ws2_32)
 | `proxy_rules.dns_mode` | string | `"direct"` | DNS策略: `direct`(直连) / `proxy`(走代理) |
 | `proxy_rules.ipv6_mode` | string | `"proxy"` | IPv6策略: `proxy`(走代理) / `direct`(直连) / `block`(阻止) |
 
+| `proxy_rules.routing.enabled` | bool | `true` | 是否启用规则路由 |
+| `proxy_rules.routing.priority_mode` | string | `"order"` | 规则优先级: `order`(按顺序) / `number`(priority) |
+| `proxy_rules.routing.default_action` | string | `"proxy"` | 未命中时默认动作 |
+| `proxy_rules.routing.use_default_private` | bool | `true` | 自动加载 RFC1918/loopback 内网直连规则 |
+| `proxy_rules.routing.rules` | array | `[]` | 规则列表（支持 CIDR/域名通配符/端口/协议） |
+
+### 规则路由 / Routing Rules
+
+路由规则由 `proxy_rules.routing` 管理，支持 CIDR/域名通配符/端口/协议分流，优先级可选 `order`(按顺序) 或 `number`(priority)。
+
+```json
+{
+  "proxy_rules": {
+    "routing": {
+      "enabled": true,
+      "priority_mode": "order",
+      "default_action": "proxy",
+      "use_default_private": true,
+      "rules": [
+        {
+          "name": "lan-direct",
+          "action": "direct",
+          "ip_cidrs_v4": ["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"],
+          "ip_cidrs_v6": ["fc00::/7","fe80::/10","::1/128"],
+          "domains": [".local","*.corp.example.com"],
+          "ports": ["445","3389","10000-20000"],
+          "protocols": ["tcp"]
+        }
+      ]
+    }
+  }
+}
+```
+
+**可视化配置工具**：`tools/config-web/index.html`（本地打开即可使用，支持导入/编辑/导出 `config.json`）。
+
+
 ### IPv6 注意事项
 
 当日志出现 `SOCKS5: 读取认证响应失败, WSA错误码=10060`，且目标是 IPv6 地址（如 `2001:4860:4860::8888:443`），表示代理没有及时响应该 IPv6 连接。
