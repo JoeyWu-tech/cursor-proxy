@@ -103,10 +103,6 @@ namespace Core {
         std::vector<CompiledRoutingRule> compiled_rules;
         std::vector<size_t> compiled_order;
 
-        void CompileRoutingRules();
-        bool MatchRouting(const std::string& host, const std::string& ip, bool ipIsV6, uint16_t port,
-                          const char* protocol, std::string* outAction, std::string* outRule) const;
-        
         // 快速判断端口是否在白名单中
         bool IsPortAllowed(uint16_t port) const {
             if (allowed_ports.empty()) return true; // 空白名单 = 允许所有
