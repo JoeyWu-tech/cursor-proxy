@@ -670,7 +670,6 @@ Launch the target application, done! 🎉
 | `child_injection` | bool | `true` | Inject into child processes |
 | `traffic_logging` | bool | `false` | Enable traffic logging |
 | `target_processes` | array | `[]` | Target process list (empty = all) |
-
 | `proxy_rules.routing.enabled` | bool | `true` | Enable rule-based routing |
 | `proxy_rules.routing.priority_mode` | string | `"order"` | Priority: `order`(list order) / `number`(priority) |
 | `proxy_rules.routing.default_action` | string | `"proxy"` | Default action when no rule matches |
@@ -706,6 +705,7 @@ Routing rules live under `proxy_rules.routing`. They support CIDR, wildcard doma
 ```
 
 **Config tool**: `tools/config-web/index.html` (open locally to import/edit/export `config.json`).
+
 **Note**: `AUTHORS.txt` lists contributors of the bundled MinHook dependency, not this project’s maintainers.
 
 **Notes**:

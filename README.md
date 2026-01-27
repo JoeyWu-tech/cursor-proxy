@@ -696,7 +696,6 @@ target_link_libraries(version PRIVATE ws2_32)
 | `proxy_rules.allowed_ports` | array | `[80, 443]` | 端口白名单 (空=全部) |
 | `proxy_rules.dns_mode` | string | `"direct"` | DNS策略: `direct`(直连) / `proxy`(走代理) |
 | `proxy_rules.ipv6_mode` | string | `"proxy"` | IPv6策略: `proxy`(走代理) / `direct`(直连) / `block`(阻止) |
-
 | `proxy_rules.routing.enabled` | bool | `true` | 是否启用规则路由 |
 | `proxy_rules.routing.priority_mode` | string | `"order"` | 规则优先级: `order`(按顺序) / `number`(priority) |
 | `proxy_rules.routing.default_action` | string | `"proxy"` | 未命中时默认动作 |
@@ -732,6 +731,7 @@ target_link_libraries(version PRIVATE ws2_32)
 ```
 
 **可视化配置工具**：`tools/config-web/index.html`（本地打开即可使用，支持导入/编辑/导出 `config.json`）。
+
 **说明**：`AUTHORS.txt` 为内嵌的 MinHook 依赖作者名单，并非本项目维护者列表。
 
 **提示**：
