@@ -274,7 +274,7 @@ $configJson = @{
     # 子进程注入排除列表（大小写不敏感，支持子串匹配）
     child_injection_exclude = @()
     # 目标进程列表（空数组=注入所有子进程）
-    target_processes = @()
+    target_processes = @("language_server_windows", "Antigravity.exe")
     proxy_rules = @{
         # 端口白名单: 仅代理 HTTP(80) 和 HTTPS(443)，空数组=代理所有端口
         allowed_ports = @(80, 443)
