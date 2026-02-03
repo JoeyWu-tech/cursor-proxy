@@ -116,13 +116,14 @@ jobs:
       id: changelog
       shell: bash
       run: |
-        set -e
+        set -euo pipefail
+        shopt -s extglob
         CURRENT_TAG="${{ needs.build.outputs.release_tag }}"
         
         # 获取上一个 tag（排除当前 tag）
         PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | grep -v "^${CURRENT_TAG}$" | head -n 1 || true)
         
-        if [ -z "$PREV_TAG" ]; then
+        if [ -z "${PREV_TAG:-}" ]; then
           echo "首次发布，获取所有提交记录"
           COMMIT_RANGE="HEAD"
         else
@@ -130,57 +131,180 @@ jobs:
           COMMIT_RANGE="${PREV_TAG}..HEAD"
         fi
         
+        trim() {
+          local s="$1"
+          s="${s//$'\r'/}"
+          s="${s##+([[:space:]])}"
+          s="${s%%+([[:space:]])}"
+          printf '%s' "$s"
+        }
+        
+        # 去掉行内的 ```fence（常见于复制粘贴时把 commit 信息包在 ``` 里）
+        strip_inline_fence() {
+          local s
+          local fence='```'
+          s="$(trim "$1")"
+        
+          # leading fence: ```lang? <content?>
+          if [[ "$s" == "$fence"* ]]; then
+            s="${s#"$fence"}"
+            s="$(trim "$s")"
+        
+            # 如果只有语言标记（如 ```text），视为纯包裹行，直接丢弃
+            if [[ "$s" =~ ^[[:alnum:]_-]+$ ]]; then
+              s=""
+            # 若形如 "lang <content>"，去掉 lang，保留 content
+            elif [[ "$s" =~ ^[[:alnum:]_-]+[[:space:]]+(.*)$ ]]; then
+              s="$(trim "${BASH_REMATCH[1]}")"
+            fi
+          fi
+        
+          # trailing fence: ... ```
+          if [[ "$s" == *"$fence" ]]; then
+            s="${s%"$fence"}"
+            s="$(trim "$s")"
+          fi
+        
+          printf '%s' "$s"
+        }
+        
+        # 仅转义反引号，避免 ``` 触发 code fence 或 `...` 触发 inline code 破坏列表结构
+        md_escape_backticks() {
+          local s="$1"
+          local tick='`'
+          s="${s//${tick}/\\${tick}}"
+          printf '%s' "$s"
+        }
+        
+        format_body_as_sublist() {
+          local body="$1"
+          body="$(trim "$body")"
+          [ -z "$body" ] && return 0
+        
+          local out=""
+          local line=""
+          while IFS= read -r line; do
+            line="$(trim "$line")"
+            [ -z "$line" ] && continue
+        
+            # 去掉单行 fence，避免破坏 Markdown（同时也兼容 AI 输出里多余的 ``` 包裹）
+            if [[ "$line" =~ ^\`\`\` ]]; then
+              continue
+            fi
+        
+            # 去掉常见列表前缀（- / * / + / 1.）
+            line="$(printf '%s' "$line" | sed -E 's/^([-*+]|[0-9]+\.)[[:space:]]+//')"
+            line="$(trim "$line")"
+            [ -z "$line" ] && continue
+        
+            line="$(md_escape_backticks "$line")"
+            out+="  - ${line}"$'\n'
+          done <<< "$body"
+        
+          out="${out%$'\n'}"
+          [ -n "$out" ] && printf '%s' "$out"
+        }
+        
         # 创建临时文件存储各类型提交
         TMPDIR=$(mktemp -d)
         for type in feat fix perf refactor docs chore style test build ci other; do
-          touch "$TMPDIR/$type.txt"
+          : > "$TMPDIR/$type.txt"
         done
         
-        # 获取提交列表，每行一个提交
-        git log $COMMIT_RANGE --pretty=format:'%h|%s' --no-merges 2>/dev/null | while IFS='|' read -r sha subject; do
-          [ -z "$sha" ] && continue
-          
-          # 获取该提交的 body
-          body=$(git log -1 --pretty=format:'%b' "$sha" 2>/dev/null | sed '/^$/d' || true)
-          
-          # 提取类型和范围，使用 grep + sed
-          if echo "$subject" | grep -qE '^[a-z]+(\([^)]+\))?:'; then
-            TYPE=$(echo "$subject" | sed -E 's/^([a-z]+)(\([^)]+\))?:.*/\1/')
-            SCOPE=$(echo "$subject" | sed -E 's/^[a-z]+(\([^)]+\))?:.*/\1/' | tr -d '()')
-            DESC=$(echo "$subject" | sed -E 's/^[a-z]+(\([^)]+\))?:[[:space:]]*//')
-            
-            # 格式化条目
+        # 获取提交列表：sha + subject + body（一次性输出，避免循环中重复调用 git log）
+        while IFS= read -r -d $'\x1e' record; do
+          record="${record%$'\n'}"
+          [ -z "$record" ] && continue
+        
+          sha="${record%%$'\n'*}"
+          rest="${record#*$'\n'}"
+          subject_raw="${rest%%$'\n'*}"
+          body_raw="${rest#*$'\n'}"
+        
+          sha="$(trim "$sha")"
+          subject_raw="$(trim "$subject_raw")"
+          body_raw="${body_raw//$'\r'/}"
+        
+          # 规范化 subject，去掉 ``` 包裹/前缀，避免误分类到 other
+          subject="$(strip_inline_fence "$subject_raw")"
+          body="$body_raw"
+        
+          # 若 subject 为空或不像 Conventional Commits，尝试从 body 提取第一条符合格式的行作为 subject
+          promoted_subject=""
+          if [ -z "$subject" ] || ! [[ "$subject" =~ ^[a-zA-Z]+(\([^)]+\))?(!)?: ]]; then
+            new_body=""
+            while IFS= read -r line; do
+              line="$(trim "$line")"
+              [ -z "$line" ] && continue
+        
+              if [[ "$line" =~ ^\`\`\` ]]; then
+                continue
+              fi
+        
+              if [ -z "$promoted_subject" ] && [[ "$line" =~ ^[a-zA-Z]+(\([^)]+\))?(!)?: ]]; then
+                promoted_subject="$(strip_inline_fence "$line")"
+                continue
+              fi
+        
+              new_body+="$line"$'\n'
+            done <<< "$body_raw"
+            body="$(trim "$new_body")"
+        
+            if [ -n "$promoted_subject" ]; then
+              subject="$promoted_subject"
+            fi
+          fi
+        
+          subject="$(trim "$subject")"
+        
+          # 解析 Conventional Commits：type(scope)!: description
+          if [[ "$subject" =~ ^([a-zA-Z]+)(\(([^\)]+)\))?(!)?:[[:space:]]*(.+)$ ]]; then
+            TYPE="${BASH_REMATCH[1],,}"
+            SCOPE="$(trim "${BASH_REMATCH[3]}")"
+            DESC="$(trim "${BASH_REMATCH[5]}")"
+        
+            scope_safe="$(md_escape_backticks "$SCOPE")"
+            desc_safe="$(md_escape_backticks "$DESC")"
+        
             if [ -n "$SCOPE" ] && [ "$SCOPE" != "$TYPE" ]; then
-              ENTRY="- **${SCOPE}**: ${DESC} (\`${sha}\`)"
+              ENTRY="- **${scope_safe}**: ${desc_safe} (\`${sha}\`)"
             else
-              ENTRY="- ${DESC} (\`${sha}\`)"
+              ENTRY="- ${desc_safe} (\`${sha}\`)"
             fi
-            
-            # 添加 body（如果有）
-            if [ -n "$body" ]; then
-              BODY_FORMATTED=$(echo "$body" | sed 's/^/  /')
-              ENTRY="${ENTRY}"$'\n'"${BODY_FORMATTED}"
+        
+            body_out="$(format_body_as_sublist "$body" || true)"
+            if [ -n "${body_out:-}" ]; then
+              ENTRY+=$'\n'"$body_out"
             fi
-            
-            # 写入对应类型文件
+        
             case "$TYPE" in
-              feat)     echo "$ENTRY" >> "$TMPDIR/feat.txt" ;;
-              fix)      echo "$ENTRY" >> "$TMPDIR/fix.txt" ;;
-              perf)     echo "$ENTRY" >> "$TMPDIR/perf.txt" ;;
-              refactor) echo "$ENTRY" >> "$TMPDIR/refactor.txt" ;;
-              docs)     echo "$ENTRY" >> "$TMPDIR/docs.txt" ;;
-              chore)    echo "$ENTRY" >> "$TMPDIR/chore.txt" ;;
-              style)    echo "$ENTRY" >> "$TMPDIR/style.txt" ;;
-              test)     echo "$ENTRY" >> "$TMPDIR/test.txt" ;;
-              build)    echo "$ENTRY" >> "$TMPDIR/build.txt" ;;
-              ci)       echo "$ENTRY" >> "$TMPDIR/ci.txt" ;;
-              *)        echo "$ENTRY" >> "$TMPDIR/other.txt" ;;
+              feat)     printf '%s\n' "$ENTRY" >> "$TMPDIR/feat.txt" ;;
+              fix)      printf '%s\n' "$ENTRY" >> "$TMPDIR/fix.txt" ;;
+              perf)     printf '%s\n' "$ENTRY" >> "$TMPDIR/perf.txt" ;;
+              refactor) printf '%s\n' "$ENTRY" >> "$TMPDIR/refactor.txt" ;;
+              docs)     printf '%s\n' "$ENTRY" >> "$TMPDIR/docs.txt" ;;
+              chore)    printf '%s\n' "$ENTRY" >> "$TMPDIR/chore.txt" ;;
+              style)    printf '%s\n' "$ENTRY" >> "$TMPDIR/style.txt" ;;
+              test)     printf '%s\n' "$ENTRY" >> "$TMPDIR/test.txt" ;;
+              build)    printf '%s\n' "$ENTRY" >> "$TMPDIR/build.txt" ;;
+              ci)       printf '%s\n' "$ENTRY" >> "$TMPDIR/ci.txt" ;;
+              *)        printf '%s\n' "$ENTRY" >> "$TMPDIR/other.txt" ;;
             esac
           else
-            # 非标准格式提交
-            echo "- ${subject} (\`${sha}\`)" >> "$TMPDIR/other.txt"
+            # 非标准格式提交：也输出 body，并做好 ```/` 处理，避免破坏 Markdown
+            subject_other="$(trim "$(strip_inline_fence "$subject_raw")")"
+            subject_other="$(md_escape_backticks "$subject_other")"
+            [ -z "$subject_other" ] && subject_other="(no subject)"
+        
+            ENTRY="- ${subject_other} (\`${sha}\`)"
+            body_out="$(format_body_as_sublist "$body_raw" || true)"
+            if [ -n "${body_out:-}" ]; then
+              ENTRY+=$'\n'"$body_out"
+            fi
+        
+            printf '%s\n' "$ENTRY" >> "$TMPDIR/other.txt"
           fi
-        done
+        done < <(git log "$COMMIT_RANGE" --no-merges --pretty=format:'%h%n%s%n%b%n%x1e' 2>/dev/null)
         
         # 构建最终的发布说明
         CHANGELOG=""
@@ -213,11 +337,13 @@ jobs:
         [ -z "$CHANGELOG" ] && CHANGELOG="暂无更新记录"
         
         # 使用 heredoc 写入多行输出（GitHub Actions 推荐方式）
+        # 使用随机分隔符，避免 changelog 内容里恰好出现 EOF 导致截断
+        DELIM="CHANGELOG_$(date +%s%N)"
         {
-          echo "body<<EOF"
-          echo "$CHANGELOG"
-          echo "EOF"
-        } >> $GITHUB_OUTPUT
+          printf 'body<<%s\n' "$DELIM"
+          printf '%s\n' "$CHANGELOG"
+          printf '%s\n' "$DELIM"
+        } >> "$GITHUB_OUTPUT"
 
     - name: 下载打包文件
       uses: actions/download-artifact@v4
