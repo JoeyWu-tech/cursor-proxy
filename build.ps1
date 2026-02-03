@@ -252,7 +252,7 @@ $configJson = @{
         "arch" = $Arch
     }
     # 日志等级：默认 info（克制日志输出）；排障时可改为 debug 以获得更详细信息
-    log_level = "info"
+    log_level = "debug"
     proxy = @{
         host = "127.0.0.1"
         port = 7890
