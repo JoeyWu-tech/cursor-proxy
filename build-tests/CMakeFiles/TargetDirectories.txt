@@ -1,0 +1,6 @@
+E:/ProjectCode/C++Code/antigravity-proxy/build-tests/CMakeFiles/version.dir
+E:/ProjectCode/C++Code/antigravity-proxy/build-tests/CMakeFiles/antigravity_tests.dir
+E:/ProjectCode/C++Code/antigravity-proxy/build-tests/CMakeFiles/RUN_TESTS.dir
+E:/ProjectCode/C++Code/antigravity-proxy/build-tests/CMakeFiles/INSTALL.dir
+E:/ProjectCode/C++Code/antigravity-proxy/build-tests/CMakeFiles/ALL_BUILD.dir
+E:/ProjectCode/C++Code/antigravity-proxy/build-tests/CMakeFiles/ZERO_CHECK.dir

@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="E:\ProjectCode\C++Code\antigravity-proxy\build-tests\CMakeFiles\3e358669c012b7f0aa6fa297d720e421\INSTALL_force.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{356195AF-6026-34D0-8275-1D73A5A1E780}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

@@ -20,7 +20,7 @@ namespace VersionProxy {
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     switch (fdwReason) {
-    case DLL_PROCESS_ATTACH:
+    case DLL_PROCESS_ATTACH: {
         DisableThreadLibraryCalls(hinstDLL);
         
         // ============================================================================
@@ -34,17 +34,25 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
         Core::Logger::Info("Antigravity-Proxy DLL 已加载 (模拟 version.dll)");
         
         // 加载配置
-        Core::Config::Instance().Load("config.json");
+        const bool loaded = Core::Config::Instance().Load("config.json");
         
+        // WARN-4: 必须检查 Load() 返回值。若加载失败则进入 BYPASS 模式，避免“坏配置导致全局网络不可用”。
+        if (!loaded) {
+            Core::Logger::Error("配置加载失败：已进入 BYPASS 模式（不安装 Hooks）。请检查 config.json 与日志告警信息。");
+            break;
+        }
+
         // 安装 Hooks（必须及时安装以确保网络流量被正确拦截）
         Hooks::Install();
         break;
+    }
         
-    case DLL_PROCESS_DETACH:
+    case DLL_PROCESS_DETACH: {
         Hooks::Uninstall();
         VersionProxy::Uninitialize();
         Core::Logger::Info("Antigravity-Proxy DLL 已卸载");
         break;
+    }
     }
     return TRUE;
 }

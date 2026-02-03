@@ -721,7 +721,6 @@ target_link_libraries(version PRIVATE ws2_32)
           "ip_cidrs_v4": ["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"],
           "ip_cidrs_v6": ["fc00::/7","fe80::/10","::1/128"],
           "domains": [".local","*.corp.example.com"],
-          "ports": ["445","3389","10000-20000"],
           "protocols": ["tcp"]
         }
       ]
@@ -739,6 +738,10 @@ target_link_libraries(version PRIVATE ws2_32)
 - 全量匹配可用 `0.0.0.0/0` 与 `::/0`。
 - 工具已支持 `proxy.host` / `proxy.port` / `proxy.type` 的编辑。
 
+### 已知问题 / Known Issues
+
+- **历史版本（已修复）：FakeIP 与 `direct + domains + ports`**：在部分旧版本中，若启用 FakeIP，且 `action=direct` 的规则同时配置了 `domains` 与 `ports`，可能出现 DNS 阶段分配 FakeIP，随后 connect 阶段“直连虚拟地址”导致连接失败。若你仍在使用旧版本，建议升级；或临时规避：移除该规则的 `ports` 条件，或关闭 FakeIP。
+
 
 ### IPv6 注意事项
 
@@ -747,6 +750,8 @@ target_link_libraries(version PRIVATE ws2_32)
 可选处理方式：
 - **不改 host，快速止血**：将 `proxy_rules.ipv6_mode` 改为 `block`（阻止）或 `direct`（直连）。
 - **继续代理 IPv6**：让代理监听 `::1` 或开启双栈，再把 `proxy.host` 改为 `::1`（确保代理实际监听）。
+
+**优先级说明**：当目标为纯 IPv6（非 v4-mapped）且 `proxy_rules.ipv6_mode` 为 `direct`/`block` 时，会在进入 `routing` 规则前直接直连/阻止；当 `ipv6_mode=proxy` 时才会继续进入 `routing` 匹配。
 
 ### 验证是否生效 / Verification
 

@@ -12,7 +12,9 @@ const defaultRouting = () => ({
       ip_cidrs_v4: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16"],
       ip_cidrs_v6: ["fc00::/7", "fe80::/10", "::1/128"],
       domains: [".local", ".lan", "*.corp.example.com"],
-      ports: ["445", "3389", "10000-20000"],
+      // 已知风险提示（历史版本）：FakeIP + direct + domains + ports 组合可能导致运行时“直连虚拟地址”失败。
+      // 这里默认不带 ports，避免用户一键导出即踩坑；如确需端口条件，请确保使用已修复该问题的版本。
+      ports: [],
       protocols: ["tcp"],
     },
   ],
@@ -60,6 +62,7 @@ const elements = {
   ruleDomains: $("ruleDomains"),
   rulePorts: $("rulePorts"),
   ruleProtocols: $("ruleProtocols"),
+  ruleRiskWarning: $("ruleRiskWarning"),
   testHost: $("testHost"),
   testPort: $("testPort"),
   testProto: $("testProto"),
@@ -69,6 +72,8 @@ const elements = {
   proxyHost: $("proxyHost"),
   proxyPort: $("proxyPort"),
 };
+
+const isFakeIpEnabled = () => (baseConfig?.fake_ip?.enabled ?? true) !== false;
 
 const normalizeRouting = (input) => {
   const base = defaultRouting();
@@ -147,6 +152,30 @@ const renderRuleEditor = () => {
   elements.ruleDomains.value = listToText(rule.domains);
   elements.rulePorts.value = listToText(rule.ports);
   elements.ruleProtocols.value = (rule.protocols || []).join(", ");
+  renderRuleRiskWarning();
+};
+
+const renderRuleRiskWarning = () => {
+  const el = elements.ruleRiskWarning;
+  if (!el) return;
+  const rule = routing.rules[selectedIndex];
+  if (!rule || !isFakeIpEnabled()) {
+    el.style.display = "none";
+    el.textContent = "";
+    return;
+  }
+  const action = (rule.action || "").toLowerCase();
+  const hasDomains = Array.isArray(rule.domains) && rule.domains.length > 0;
+  const hasPorts = Array.isArray(rule.ports) && rule.ports.length > 0;
+  if (action === "direct" && hasDomains && hasPorts) {
+    el.style.display = "block";
+    el.textContent =
+      "⚠️ 风险提示：当前规则为 direct + domains + ports。启用 FakeIP 时，该组合会影响 DNS 阶段命中与运行时行为。" +
+      " 本工具的“规则命中测试”不模拟 FakeIP 分配/回填与 connect 阶段重解析，请以运行日志为准。";
+    return;
+  }
+  el.style.display = "none";
+  el.textContent = "";
 };
 
 const updateRuleFromEditor = () => {
@@ -162,6 +191,7 @@ const updateRuleFromEditor = () => {
   rule.ports = parseList(elements.rulePorts.value);
   rule.protocols = parseList(elements.ruleProtocols.value);
   renderRuleList();
+  renderRuleRiskWarning();
 };
 
 const syncGlobalFromEditor = () => {
@@ -186,12 +216,53 @@ const loadConfig = (json) => {
 const downloadConfig = () => {
   const out = JSON.parse(JSON.stringify(baseConfig || {}));
   if (!out.proxy_rules) out.proxy_rules = {};
-  out.proxy_rules.routing = routing;
+  // 导出前做强校验：过滤明显无效输入，避免生成“必失败配置”
+  const exportRouting = JSON.parse(JSON.stringify(routing));
+  const warnings = [];
+  exportRouting.default_action = (exportRouting.default_action || "proxy").toLowerCase();
+  if (!["proxy", "direct"].includes(exportRouting.default_action)) {
+    warnings.push(`routing.default_action 无效(${exportRouting.default_action})，已回退为 proxy`);
+    exportRouting.default_action = "proxy";
+  }
+  exportRouting.priority_mode = (exportRouting.priority_mode || "order").toLowerCase();
+  if (!["order", "number"].includes(exportRouting.priority_mode)) {
+    warnings.push(`routing.priority_mode 无效(${exportRouting.priority_mode})，已回退为 order`);
+    exportRouting.priority_mode = "order";
+  }
+  exportRouting.rules = (exportRouting.rules || []).map((r, idx) => {
+    const rule = { ...defaultRule(), ...r };
+    rule.name = rule.name || `rule-${idx + 1}`;
+    rule.action = (rule.action || exportRouting.default_action || "proxy").toLowerCase();
+    if (!["proxy", "direct"].includes(rule.action)) {
+      warnings.push(`规则 ${rule.name}: action 无效(${rule.action})，已回退为 ${exportRouting.default_action}`);
+      rule.action = exportRouting.default_action;
+    }
+    const v4 = (Array.isArray(rule.ip_cidrs_v4) ? rule.ip_cidrs_v4 : []).map(String);
+    const v6 = (Array.isArray(rule.ip_cidrs_v6) ? rule.ip_cidrs_v6 : []).map(String);
+    rule.ip_cidrs_v4 = v4.filter((x) => parseCidrV4(x) !== null);
+    rule.ip_cidrs_v6 = v6.filter((x) => parseCidrV6(x) !== null);
+    const ports = (Array.isArray(rule.ports) ? rule.ports : []).map(String);
+    rule.ports = ports.filter((x) => parsePortRanges([x]).length === 1);
+    const protos = (Array.isArray(rule.protocols) ? rule.protocols : []).map((x) => String(x).trim()).filter(Boolean);
+    // 当前实现仅支持 tcp；若未来扩展，再放开
+    rule.protocols = protos.length ? protos.filter((p) => p.toLowerCase() === "tcp") : ["tcp"];
+    rule.domains = (Array.isArray(rule.domains) ? rule.domains : []).map(String).map((x) => x.trim()).filter(Boolean);
+    return rule;
+  });
+  out.proxy_rules.routing = exportRouting;
   if (!out.proxy) out.proxy = {};
   out.proxy.type = elements.proxyType.value || "socks5";
   out.proxy.host = elements.proxyHost.value.trim() || "127.0.0.1";
   const portValue = parseInt(elements.proxyPort.value || "7890", 10);
-  out.proxy.port = Number.isFinite(portValue) ? portValue : 7890;
+  if (!Number.isFinite(portValue) || portValue <= 0 || portValue > 65535) {
+    warnings.push(`proxy.port 非法(${elements.proxyPort.value || ""})，已回退为 7890`);
+    out.proxy.port = 7890;
+  } else {
+    out.proxy.port = portValue;
+  }
+  if (warnings.length) {
+    alert("导出前已自动修正/过滤以下问题：\n\n- " + warnings.join("\n- "));
+  }
   const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -364,7 +435,7 @@ const matchProtocols = (proto, list) => {
 };
 
 const matchRouting = (host, port, proto) => {
-  if (!routing.enabled) return { action: "proxy", rule: "(disabled)" };
+  if (!routing.enabled) return { action: "proxy", rule: "(disabled)", matchedRule: null };
   const rules = getEffectiveRules();
   const hostStr = host?.trim() || "";
   const ip4 = parseIPv4(hostStr);
@@ -376,14 +447,14 @@ const matchRouting = (host, port, proto) => {
     if (!matchPorts(port, parsePortRanges(rule.ports || []))) continue;
 
     if (rule.domains && rule.domains.some((p) => matchDomainPattern(p, hostStr))) {
-      return { action: rule.action || routing.default_action, rule: rule.name };
+      return { action: rule.action || routing.default_action, rule: rule.name, matchedRule: rule };
     }
 
     if (ip4 !== null && rule.ip_cidrs_v4) {
       for (const cidr of rule.ip_cidrs_v4) {
         const parsed = parseCidrV4(cidr);
         if (parsed && matchCidrV4(ip4, parsed)) {
-          return { action: rule.action || routing.default_action, rule: rule.name };
+          return { action: rule.action || routing.default_action, rule: rule.name, matchedRule: rule };
         }
       }
     }
@@ -392,13 +463,13 @@ const matchRouting = (host, port, proto) => {
       for (const cidr of rule.ip_cidrs_v6) {
         const parsed = parseCidrV6(cidr);
         if (parsed && matchCidrV6(ip6, parsed)) {
-          return { action: rule.action || routing.default_action, rule: rule.name };
+          return { action: rule.action || routing.default_action, rule: rule.name, matchedRule: rule };
         }
       }
     }
   }
 
-  return { action: routing.default_action || "proxy", rule: "(default)" };
+  return { action: routing.default_action || "proxy", rule: "(default)", matchedRule: null };
 };
 
 const bindEvents = () => {
@@ -502,8 +573,20 @@ const bindEvents = () => {
     const proto = elements.testProto.value;
     updateRuleFromEditor();
     syncGlobalFromEditor();
-    const result = matchRouting(host, port, proto);
-    elements.testResult.textContent = `结果：${result.action} （命中：${result.rule}）`;
+    const resultConnect = matchRouting(host, port, proto);
+    const resultDns = matchRouting(host, 0, proto);
+    const lines = [
+      `Connect 阶段：${resultConnect.action} （命中：${resultConnect.rule}）`,
+      `DNS 阶段模拟（port=0）：${resultDns.action} （命中：${resultDns.rule}）`,
+    ];
+    if (isFakeIpEnabled()) {
+      lines.push("提示：本测试不模拟 FakeIP 分配/回填；DNS 阶段通常只有 (host, service) 且 service 可能为空。");
+      const r = resultConnect.matchedRule;
+      if (r && (r.action || "").toLowerCase() === "direct" && (r.domains || []).length && (r.ports || []).length) {
+        lines.push("提示：当前命中规则为 direct + domains + ports，建议结合运行日志确认是否符合预期。");
+      }
+    }
+    elements.testResult.textContent = lines.join("\n");
   });
 };
 

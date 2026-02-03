@@ -176,8 +176,19 @@ namespace Network {
             std::string ipPart = cidr.substr(0, slashPos);
             std::string bitsPart = cidr.substr(slashPos + 1);
             
-            int bits = std::stoi(bitsPart);
-            if (bits < 0 || bits > 32) return false;
+            // WARN-3: 避免 std::stoi 抛异常导致初始化失败（使用 from_chars，失败返回 false）
+            auto trim = [](std::string_view s) -> std::string_view {
+                while (!s.empty() && std::isspace((unsigned char)s.front())) s.remove_prefix(1);
+                while (!s.empty() && std::isspace((unsigned char)s.back())) s.remove_suffix(1);
+                return s;
+            };
+            std::string_view bitsView = trim(bitsPart);
+            if (bitsView.empty()) return false;
+            uint32_t bitsU = 0;
+            auto rc = std::from_chars(bitsView.data(), bitsView.data() + bitsView.size(), bitsU, 10);
+            if (rc.ec != std::errc() || rc.ptr != bitsView.data() + bitsView.size()) return false;
+            if (bitsU > 32) return false;
+            const int bits = (int)bitsU;
 
             in_addr addr;
             if (inet_pton(AF_INET, ipPart.c_str(), &addr) != 1) return false;

@@ -8,6 +8,9 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <mswsock.h>
+#include <charconv>
+#include <cctype>
+#include <string_view>
 #include <unordered_map>
 #include <mutex>
 #include <atomic>
@@ -154,6 +157,43 @@ static std::string WideToUtf8(PCWSTR input) {
     WideCharToMultiByte(CP_UTF8, 0, input, -1, &result[0], len, NULL, NULL);
     if (!result.empty() && result.back() == '\0') result.pop_back();
     return result;
+}
+
+static std::string_view TrimView(std::string_view s) {
+    while (!s.empty() && std::isspace((unsigned char)s.front())) s.remove_prefix(1);
+    while (!s.empty() && std::isspace((unsigned char)s.back())) s.remove_suffix(1);
+    return s;
+}
+
+// CRIT-3: DNS 阶段需要尽可能拿到端口，避免 direct+domains+ports 规则因 port=0 永远命不中而分配 FakeIP
+static uint16_t ParseServiceNameToPortA(PCSTR pServiceName, const char* proto) {
+    if (!pServiceName) return 0;
+    std::string_view s = TrimView(std::string_view(pServiceName));
+    if (s.empty()) return 0;
+
+    // 1) 纯数字端口（最常见）
+    uint32_t port = 0;
+    auto rc = std::from_chars(s.data(), s.data() + s.size(), port, 10);
+    if (rc.ec == std::errc() && rc.ptr == s.data() + s.size()) {
+        if (port > 0 && port <= 65535) return (uint16_t)port;
+        return 0;
+    }
+
+    // 2) 服务名（如 "https"），尝试系统 services 映射
+    const std::string name(s);
+    const char* protocol = (proto && *proto) ? proto : "tcp";
+    servent* se = getservbyname(name.c_str(), protocol);
+    if (!se) return 0;
+    const int p = ntohs((u_short)se->s_port);
+    if (p > 0 && p <= 65535) return (uint16_t)p;
+    return 0;
+}
+
+static uint16_t ParseServiceNameToPortW(PCWSTR pServiceName, const char* proto) {
+    if (!pServiceName) return 0;
+    const std::string s = WideToUtf8(pServiceName);
+    if (s.empty()) return 0;
+    return ParseServiceNameToPortA(s.c_str(), proto);
 }
 
 // 获取 socket 类型（SOCK_STREAM / SOCK_DGRAM），用于避免误把 UDP/QUIC 当成 TCP 走代理
@@ -604,6 +644,78 @@ static bool ResolveNameToAddr(const std::string& node, const std::string& servic
     return false;
 }
 
+// CRIT-3 兜底：当路由命中 direct 但底层 sockaddr 仍为 FakeIP 时，重解析域名并直连真实地址，避免“直连虚拟地址”必失败。
+// 说明：该逻辑仅在“direct + FakeIP”这一异常组合触发，不影响正常路径性能。
+static bool TryResolveDirectTargetFromFakeIp(const sockaddr* name, const std::string& host, uint16_t port,
+                                            sockaddr_storage* out, int* outLen, bool* outWasFakeIp) {
+    if (outWasFakeIp) *outWasFakeIp = false;
+    if (!name || !out || !outLen) return false;
+    if (host.empty() || port == 0) return false;
+
+    // 仅处理 FakeIP（IPv4 及 v4-mapped IPv6）
+    bool isFake = false;
+    const bool allow = Core::Config::Instance().fakeIp.enabled;
+    if (!allow) return false;
+
+    const int family = (int)name->sa_family;
+    if (family == AF_INET) {
+        const auto* a4 = (const sockaddr_in*)name;
+        isFake = Network::FakeIP::Instance().IsFakeIP(a4->sin_addr.s_addr);
+    } else if (family == AF_INET6) {
+        const auto* a6 = (const sockaddr_in6*)name;
+        if (IN6_IS_ADDR_V4MAPPED(&a6->sin6_addr)) {
+            in_addr v4{};
+            const unsigned char* raw = reinterpret_cast<const unsigned char*>(&a6->sin6_addr);
+            memcpy(&v4, raw + 12, sizeof(v4));
+            isFake = Network::FakeIP::Instance().IsFakeIP(v4.s_addr);
+        }
+    }
+
+    if (!isFake) return false;
+    if (outWasFakeIp) *outWasFakeIp = true;
+
+    // 若 host 本身是 IP 字面量，重解析意义不大（也可能改变语义），这里直接交给上层回退。
+    if (IsIpLiteralHost(host)) return false;
+
+    const std::string service = std::to_string(port);
+    int err = 0;
+
+    // 优先按原始地址族重解析，保持与 socket family 兼容
+    if (family == AF_INET) {
+        return ResolveNameToAddrWithFamily(host, service, AF_INET, out, outLen, &err);
+    }
+
+    // v4-mapped IPv6：先尝试 IPv6（有 AAAA 时更准确）；失败则解析 IPv4 并转换为 v4-mapped IPv6
+    if (family == AF_INET6) {
+        if (ResolveNameToAddrWithFamily(host, service, AF_INET6, out, outLen, &err)) {
+            return true;
+        }
+
+        sockaddr_storage v4{};
+        int v4Len = 0;
+        if (!ResolveNameToAddrWithFamily(host, service, AF_INET, &v4, &v4Len, &err)) {
+            return false;
+        }
+        if (v4.ss_family != AF_INET) return false;
+
+        const auto* a4 = (const sockaddr_in*)&v4;
+        sockaddr_in6 mapped{};
+        mapped.sin6_family = AF_INET6;
+        mapped.sin6_port = htons(port);
+        memset(&mapped.sin6_addr, 0, sizeof(mapped.sin6_addr));
+        mapped.sin6_addr.u.Byte[10] = 0xff;
+        mapped.sin6_addr.u.Byte[11] = 0xff;
+        memcpy(&mapped.sin6_addr.u.Byte[12], &a4->sin_addr, sizeof(a4->sin_addr));
+
+        memset(out, 0, sizeof(sockaddr_storage));
+        memcpy(out, &mapped, sizeof(mapped));
+        *outLen = (int)sizeof(mapped);
+        return true;
+    }
+
+    return false;
+}
+
 static bool DoProxyHandshake(SOCKET s, const std::string& host, uint16_t port) {
     // FIX-2: 预检确保 socket 已成功连接到代理服务器，避免在未连接的 socket 上发送数据
     sockaddr_storage peerAddr{};
@@ -836,6 +948,8 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
 
         // v4-mapped IPv6 本质是 IPv4 连接：不应被 ipv6_mode 误伤（否则会影响 FakeIP v4-mapped 回填）
         if (!isV4Mapped) {
+            // WARN-5: 优先级说明：纯 IPv6 连接会先按 ipv6_mode 决策（direct/block/proxy），
+            // 仅当 ipv6_mode=proxy 时才会继续进入下方的 routing 规则匹配。
             std::string addrStr = SockaddrToString(name);
             if (config.proxy.port != 0) {
                 const std::string& ipv6Mode = config.rules.ipv6_mode;
@@ -917,6 +1031,22 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
         Core::Logger::Info("[Route] direct" +
                            std::string(routeMatched ? (" rule=" + routeRule) : " rule=(default)") +
                            ", target=" + originalHost + ":" + std::to_string(originalPort));
+        // CRIT-3: 若底层 sockaddr 仍为 FakeIP，则 direct 直连必失败；这里做兜底重解析
+        sockaddr_storage realAddr{};
+        int realLen = 0;
+        bool wasFake = false;
+        if (TryResolveDirectTargetFromFakeIp(name, originalHost, originalPort, &realAddr, &realLen, &wasFake)) {
+            const std::string dst = SockaddrToString((sockaddr*)&realAddr);
+            Core::Logger::Info("[Route] direct: FakeIP 已重解析直连" +
+                               (dst.empty() ? std::string("") : (", addr=" + dst)) +
+                               ", target=" + originalHost + ":" + std::to_string(originalPort));
+            return isWsa ? fpWSAConnect(s, (sockaddr*)&realAddr, realLen, NULL, NULL, NULL, NULL)
+                         : fpConnect(s, (sockaddr*)&realAddr, realLen);
+        }
+        if (wasFake) {
+            Core::Logger::Warn("[Route] direct: 目标为 FakeIP 但重解析失败，回退原始直连(可能失败), target=" +
+                               originalHost + ":" + std::to_string(originalPort));
+        }
         return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL)
                      : fpConnect(s, name, namelen);
     } else if (routeMatched) {
@@ -1100,12 +1230,14 @@ int WSAAPI DetourGetAddrInfo(PCSTR pNodeName, PCSTR pServiceName,
         std::string node = pNodeName;
         std::string routeAction;
         std::string routeRule;
-        const bool routeMatched = config.rules.MatchRouting(node, "", false, 0, "tcp", &routeAction, &routeRule);
+        const uint16_t port = ParseServiceNameToPortA(pServiceName, "tcp");
+        const bool routeMatched = config.rules.MatchRouting(node, "", false, port, "tcp", &routeAction, &routeRule);
         if (!routeAction.empty() && routeAction == "direct") {
             if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
                 Core::Logger::Debug("[Route] DNS bypass FakeIP, rule=" +
                                     std::string(routeMatched ? routeRule : "(default)") +
-                                    ", host=" + node);
+                                    ", host=" + node +
+                                    (port ? (":" + std::to_string(port)) : std::string("")));
             }
             return fpGetAddrInfo(pNodeName, pServiceName, pHints, ppResult);
         }
@@ -1156,12 +1288,14 @@ int WSAAPI DetourGetAddrInfoW(PCWSTR pNodeName, PCWSTR pServiceName,
         std::string nodeUtf8 = WideToUtf8(pNodeName);
         std::string routeAction;
         std::string routeRule;
-        const bool routeMatched = config.rules.MatchRouting(nodeUtf8, "", false, 0, "tcp", &routeAction, &routeRule);
+        const uint16_t port = ParseServiceNameToPortW(pServiceName, "tcp");
+        const bool routeMatched = config.rules.MatchRouting(nodeUtf8, "", false, port, "tcp", &routeAction, &routeRule);
         if (!routeAction.empty() && routeAction == "direct") {
             if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
                 Core::Logger::Debug("[Route] DNS bypass FakeIP, rule=" +
                                     std::string(routeMatched ? routeRule : "(default)") +
-                                    ", host=" + nodeUtf8);
+                                    ", host=" + nodeUtf8 +
+                                    (port ? (":" + std::to_string(port)) : std::string("")));
             }
             return fpGetAddrInfoW(pNodeName, pServiceName, pHints, ppResult);
         }
@@ -1508,6 +1642,7 @@ BOOL PASCAL DetourConnectEx(
 
         // v4-mapped IPv6 本质是 IPv4 连接：不应被 ipv6_mode 误伤（否则会影响 FakeIP v4-mapped 回填）
         if (!isV4Mapped) {
+            // WARN-5: 同 PerformProxyConnect：纯 IPv6 连接先按 ipv6_mode 决策，仅 ipv6_mode=proxy 时才继续 routing
             std::string addrStr = SockaddrToString(name);
             if (config.proxy.port != 0) {
                 const std::string& ipv6Mode = config.rules.ipv6_mode;
@@ -1582,6 +1717,21 @@ BOOL PASCAL DetourConnectEx(
         Core::Logger::Info("[Route] direct" +
                            std::string(routeMatched ? (" rule=" + routeRule) : " rule=(default)") +
                            ", target=" + originalHost + ":" + std::to_string(originalPort));
+        // CRIT-3: direct + FakeIP 兜底重解析，避免“直连虚拟地址”必失败
+        sockaddr_storage realAddr{};
+        int realLen = 0;
+        bool wasFake = false;
+        if (TryResolveDirectTargetFromFakeIp(name, originalHost, originalPort, &realAddr, &realLen, &wasFake)) {
+            const std::string dst = SockaddrToString((sockaddr*)&realAddr);
+            Core::Logger::Info("[Route] direct: FakeIP 已重解析直连(ConnectEx)" +
+                               (dst.empty() ? std::string("") : (", addr=" + dst)) +
+                               ", target=" + originalHost + ":" + std::to_string(originalPort));
+            return originalConnectEx(s, (sockaddr*)&realAddr, realLen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+        }
+        if (wasFake) {
+            Core::Logger::Warn("[Route] direct: 目标为 FakeIP 但重解析失败，回退原始直连(ConnectEx, 可能失败), target=" +
+                               originalHost + ":" + std::to_string(originalPort));
+        }
         return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
     } else if (routeMatched) {
         Core::Logger::Info("[Route] proxy rule=" + routeRule +

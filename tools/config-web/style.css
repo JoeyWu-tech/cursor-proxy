@@ -172,7 +172,6 @@ button:focus-visible,
   background: var(--surface-1);
   border: 1px solid var(--border);
 }
-}
 
 .card-header {
   display: flex;
@@ -253,6 +252,11 @@ button:focus-visible,
   border: 1px solid rgba(95, 175, 255, 0.4);
   color: var(--text);
   min-height: 44px;
+}
+
+.notice.warn {
+  background: rgba(229, 181, 103, 0.12);
+  border-color: rgba(229, 181, 103, 0.45);
 }
 
 .hint {

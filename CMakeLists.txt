@@ -120,3 +120,20 @@ endif()
 #     INSTALL     #
 ###################
 install(TARGETS version RUNTIME DESTINATION "bin")
+
+###################
+#      TESTS      #
+###################
+option(BUILD_TESTS "构建单元测试（默认关闭）" OFF)
+if(BUILD_TESTS)
+  enable_testing()
+  add_executable(antigravity_tests
+    "tests/test_ipv6_parser.cpp"
+  )
+  target_include_directories(antigravity_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  )
+  target_link_libraries(antigravity_tests PRIVATE ws2_32)
+  add_test(NAME antigravity_tests COMMAND antigravity_tests)
+endif()

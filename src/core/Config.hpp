@@ -6,8 +6,12 @@
 #include <algorithm>
 #include <cctype>
 #include <array>
+#include <charconv>
+#include <system_error>
 #include <sstream>
 #include <cstdint>
+#include <string_view>
+#include <utility>
 #include "Logger.hpp"
 
 namespace Core {
@@ -103,11 +107,20 @@ namespace Core {
         std::vector<CompiledRoutingRule> compiled_rules;
         std::vector<size_t> compiled_order;
 
+        // 编译统计（用于启动日志摘要，便于快速判断规则是否生效）
+        size_t compiled_valid_cidr_v4 = 0;
+        size_t compiled_valid_cidr_v6 = 0;
+        size_t compiled_valid_port_ranges = 0;
+        size_t compiled_skipped_invalid_items = 0;
+        size_t compiled_skipped_invalid_cidr_v4 = 0;
+        size_t compiled_skipped_invalid_cidr_v6 = 0;
+        size_t compiled_skipped_invalid_ports = 0;
+
         // 快速判断端口是否在白名单中
         bool IsPortAllowed(uint16_t port) const {
             if (allowed_ports.empty()) return true; // 空白名单 = 允许所有
-            return std::find(allowed_ports.begin(), allowed_ports.end(), port) 
-                   != allowed_ports.end();
+            // 约定：Load() 后会对 allowed_ports 排序去重，这里用 binary_search 提升热路径性能
+            return std::binary_search(allowed_ports.begin(), allowed_ports.end(), port);
         }
 
         static std::string ToLower(std::string s) {
@@ -121,79 +134,125 @@ namespace Core {
             return s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
         }
 
-        static bool ParseIPv4(const std::string& ip, uint32_t* outHostOrder) {
+        // 去除首尾空白（仅用于配置解析；运行时热路径尽量避免额外分配）
+        static std::string_view TrimView(std::string_view s) {
+            while (!s.empty() && std::isspace((unsigned char)s.front())) s.remove_prefix(1);
+            while (!s.empty() && std::isspace((unsigned char)s.back())) s.remove_suffix(1);
+            return s;
+        }
+
+        // 安全整数解析：不抛异常，失败返回 false
+        static bool TryParseUInt32(std::string_view s, uint32_t* out, int base = 10) {
+            if (!out) return false;
+            s = TrimView(s);
+            if (s.empty()) return false;
+            uint32_t v = 0;
+            const char* begin = s.data();
+            const char* end = s.data() + s.size();
+            auto rc = std::from_chars(begin, end, v, base);
+            if (rc.ec != std::errc() || rc.ptr != end) return false;
+            *out = v;
+            return true;
+        }
+
+        static bool ParseIPv4View(std::string_view ip, uint32_t* outHostOrder) {
             if (!outHostOrder) return false;
+            ip = TrimView(ip);
             uint32_t parts[4] = {0, 0, 0, 0};
             size_t start = 0;
             for (int i = 0; i < 4; i++) {
                 size_t end = ip.find('.', start);
-                if (end == std::string::npos && i != 3) return false;
-                std::string token = (end == std::string::npos) ? ip.substr(start) : ip.substr(start, end - start);
+                if (end == std::string_view::npos && i != 3) return false;
+                std::string_view token = (end == std::string_view::npos) ? ip.substr(start)
+                                                                         : ip.substr(start, end - start);
+                token = TrimView(token);
                 if (token.empty() || token.size() > 3) return false;
-                for (char c : token) if (!std::isdigit((unsigned char)c)) return false;
-                int value = std::stoi(token);
-                if (value < 0 || value > 255) return false;
-                parts[i] = static_cast<uint32_t>(value);
-                if (end == std::string::npos) break;
+                uint32_t value = 0;
+                if (!TryParseUInt32(token, &value, 10)) return false;
+                if (value > 255) return false;
+                parts[i] = value;
+                if (end == std::string_view::npos) break;
                 start = end + 1;
             }
             *outHostOrder = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
             return true;
         }
 
+        static bool ParseIPv4(const std::string& ip, uint32_t* outHostOrder) {
+            return ParseIPv4View(ip, outHostOrder);
+        }
+
         static bool ParseIPv6(const std::string& ip, std::array<uint8_t, 16>* out) {
             if (!out) return false;
-            std::array<uint16_t, 8> words{};
-            int wordIndex = 0;
-            int compressIndex = -1;
+            std::string_view s = TrimView(ip);
+            if (s.empty()) return false;
 
-            auto pushWord = [&](const std::string& part) -> bool {
+            auto parseHexWord = [&](std::string_view part, uint16_t* outWord) -> bool {
+                if (!outWord) return false;
+                part = TrimView(part);
                 if (part.empty() || part.size() > 4) return false;
-                uint16_t value = 0;
-                for (char c : part) {
-                    value <<= 4;
-                    if (c >= '0' && c <= '9') value |= (c - '0');
-                    else if (c >= 'a' && c <= 'f') value |= (c - 'a' + 10);
-                    else if (c >= 'A' && c <= 'F') value |= (c - 'A' + 10);
-                    else return false;
-                }
-                if (wordIndex >= 8) return false;
-                words[wordIndex++] = value;
+                uint32_t tmp = 0;
+                if (!TryParseUInt32(part, &tmp, 16)) return false;
+                if (tmp > 0xFFFF) return false;
+                *outWord = (uint16_t)tmp;
                 return true;
             };
 
-            size_t i = 0;
-            while (i < ip.size()) {
-                if (ip[i] == ':') {
-                    if (i + 1 < ip.size() && ip[i + 1] == ':') {
-                        if (compressIndex != -1) return false;
-                        compressIndex = wordIndex;
-                        i += 2;
-                        if (i >= ip.size()) break;
-                        continue;
+            auto parseSide = [&](std::string_view side, std::array<uint16_t, 8>* outWords, int* outCount) -> bool {
+                if (!outWords || !outCount) return false;
+                *outCount = 0;
+                if (side.empty()) return true;
+                size_t start = 0;
+                while (start <= side.size()) {
+                    size_t end = side.find(':', start);
+                    std::string_view token = (end == std::string_view::npos) ? side.substr(start)
+                                                                             : side.substr(start, end - start);
+                    if (token.empty()) return false; // 不允许出现单独的 ':'（:: 压缩已在外层处理）
+                    if (token.find('.') != std::string_view::npos) {
+                        // IPv4-embedded IPv6：仅允许出现在最后一个 token
+                        if (end != std::string_view::npos) return false;
+                        uint32_t ip4 = 0;
+                        if (!ParseIPv4View(token, &ip4)) return false;
+                        if (*outCount + 2 > 8) return false;
+                        (*outWords)[(*outCount)++] = (uint16_t)((ip4 >> 16) & 0xFFFF);
+                        (*outWords)[(*outCount)++] = (uint16_t)(ip4 & 0xFFFF);
+                        return true;
                     }
-                    i++;
-                    continue;
+                    uint16_t w = 0;
+                    if (!parseHexWord(token, &w)) return false;
+                    if (*outCount >= 8) return false;
+                    (*outWords)[(*outCount)++] = w;
+                    if (end == std::string_view::npos) break;
+                    start = end + 1;
                 }
-                size_t next = ip.find(':', i);
-                std::string part = (next == std::string::npos) ? ip.substr(i) : ip.substr(i, next - i);
-                if (!pushWord(part)) return false;
-                if (next == std::string::npos) break;
-                i = next + 1;
+                return true;
+            };
+
+            std::array<uint16_t, 8> words{};
+            const size_t dc = s.find("::");
+            if (dc != std::string_view::npos) {
+                // 仅允许出现一次 ::
+                if (s.find("::", dc + 2) != std::string_view::npos) return false;
+                std::array<uint16_t, 8> left{};
+                std::array<uint16_t, 8> right{};
+                int leftCount = 0;
+                int rightCount = 0;
+                if (!parseSide(s.substr(0, dc), &left, &leftCount)) return false;
+                if (!parseSide(s.substr(dc + 2), &right, &rightCount)) return false;
+                if (leftCount + rightCount > 8) return false;
+                const int fill = 8 - (leftCount + rightCount);
+                if (fill <= 0) return false; // :: 必须至少压缩 1 个 16-bit 段
+                int idx = 0;
+                for (int i = 0; i < leftCount; i++) words[idx++] = left[i];
+                for (int i = 0; i < fill; i++) words[idx++] = 0;
+                for (int i = 0; i < rightCount; i++) words[idx++] = right[i];
+                if (idx != 8) return false;
+            } else {
+                int count = 0;
+                if (!parseSide(s, &words, &count)) return false;
+                if (count != 8) return false;
             }
 
-            if (compressIndex != -1) {
-                int toInsert = 8 - wordIndex;
-                for (int j = wordIndex - 1; j >= compressIndex; j--) {
-                    words[j + toInsert] = words[j];
-                }
-                for (int j = 0; j < toInsert; j++) {
-                    words[compressIndex + j] = 0;
-                }
-                wordIndex = 8;
-            }
-
-            if (wordIndex != 8) return false;
             for (int k = 0; k < 8; k++) {
                 (*out)[k * 2] = static_cast<uint8_t>(words[k] >> 8);
                 (*out)[k * 2 + 1] = static_cast<uint8_t>(words[k] & 0xff);
@@ -205,14 +264,14 @@ namespace Core {
             if (!out) return false;
             size_t slashPos = cidr.find('/');
             if (slashPos == std::string::npos) return false;
-            std::string ipPart = cidr.substr(0, slashPos);
-            std::string bitsPart = cidr.substr(slashPos + 1);
+            std::string_view ipPart = TrimView(std::string_view(cidr).substr(0, slashPos));
+            std::string_view bitsPart = TrimView(std::string_view(cidr).substr(slashPos + 1));
             if (bitsPart.empty()) return false;
-            for (char c : bitsPart) if (!std::isdigit((unsigned char)c)) return false;
-            int bits = std::stoi(bitsPart);
-            if (bits < 0 || bits > 32) return false;
+            uint32_t bitsU = 0;
+            if (!TryParseUInt32(bitsPart, &bitsU, 10) || bitsU > 32) return false;
+            const int bits = (int)bitsU;
             uint32_t ip = 0;
-            if (!ParseIPv4(ipPart, &ip)) return false;
+            if (!ParseIPv4View(ipPart, &ip)) return false;
             uint32_t mask = (bits == 0) ? 0 : (0xFFFFFFFFu << (32 - bits));
             out->mask = mask;
             out->network = ip & mask;
@@ -223,14 +282,14 @@ namespace Core {
             if (!out) return false;
             size_t slashPos = cidr.find('/');
             if (slashPos == std::string::npos) return false;
-            std::string ipPart = cidr.substr(0, slashPos);
-            std::string bitsPart = cidr.substr(slashPos + 1);
+            std::string_view ipPart = TrimView(std::string_view(cidr).substr(0, slashPos));
+            std::string_view bitsPart = TrimView(std::string_view(cidr).substr(slashPos + 1));
             if (bitsPart.empty()) return false;
-            for (char c : bitsPart) if (!std::isdigit((unsigned char)c)) return false;
-            int bits = std::stoi(bitsPart);
-            if (bits < 0 || bits > 128) return false;
+            uint32_t bitsU = 0;
+            if (!TryParseUInt32(bitsPart, &bitsU, 10) || bitsU > 128) return false;
+            const int bits = (int)bitsU;
             std::array<uint8_t, 16> addr{};
-            if (!ParseIPv6(ipPart, &addr)) return false;
+            if (!ParseIPv6(std::string(ipPart), &addr)) return false;
             out->network = addr;
             out->prefix = bits;
             if (bits == 0) {
@@ -285,16 +344,15 @@ namespace Core {
 
         static bool MatchDomainPattern(const std::string& pattern, const std::string& host) {
             if (pattern.empty() || host.empty()) return false;
-            std::string p = ToLower(pattern);
-            std::string h = ToLower(host);
-
-            // 去掉末尾的点
-            if (!h.empty() && h.back() == '.') h.pop_back();
+            // 性能优化：pattern/host 在上层已统一转为小写并去掉末尾 '.'，此处避免重复 ToLower 与分配。
+            const std::string& p = pattern;
+            const std::string& h = host;
 
             const bool hasWildcard = (p.find('*') != std::string::npos) || (p.find('?') != std::string::npos);
             if (!hasWildcard && !p.empty() && p[0] == '.') {
-                std::string root = p.substr(1);
-                if (h == root) return true;
+                // 规则 ".example.com" 需同时匹配 "example.com" 与 "*.example.com"
+                const size_t rootLen = p.size() - 1;
+                if (h.size() == rootLen && h.compare(0, rootLen, p, 1, rootLen) == 0) return true;
                 return EndsWith(h, p);
             }
             if (!hasWildcard) return h == p;
@@ -310,9 +368,8 @@ namespace Core {
             if (t.empty()) return false;
             size_t dash = t.find('-');
             if (dash == std::string::npos) {
-                for (char c : t) if (!std::isdigit((unsigned char)c)) return false;
-                int v = std::stoi(t);
-                if (v < 0 || v > 65535) return false;
+                uint32_t v = 0;
+                if (!TryParseUInt32(t, &v, 10) || v > 65535) return false;
                 out->start = static_cast<uint16_t>(v);
                 out->end = static_cast<uint16_t>(v);
                 return true;
@@ -320,11 +377,10 @@ namespace Core {
             std::string a = t.substr(0, dash);
             std::string b = t.substr(dash + 1);
             if (a.empty() || b.empty()) return false;
-            for (char c : a) if (!std::isdigit((unsigned char)c)) return false;
-            for (char c : b) if (!std::isdigit((unsigned char)c)) return false;
-            int va = std::stoi(a);
-            int vb = std::stoi(b);
-            if (va < 0 || va > 65535 || vb < 0 || vb > 65535) return false;
+            uint32_t va = 0;
+            uint32_t vb = 0;
+            if (!TryParseUInt32(a, &va, 10) || !TryParseUInt32(b, &vb, 10)) return false;
+            if (va > 65535 || vb > 65535) return false;
             if (va > vb) std::swap(va, vb);
             out->start = static_cast<uint16_t>(va);
             out->end = static_cast<uint16_t>(vb);
@@ -352,6 +408,13 @@ namespace Core {
         void CompileRoutingRules() {
             compiled_rules.clear();
             compiled_order.clear();
+            compiled_valid_cidr_v4 = 0;
+            compiled_valid_cidr_v6 = 0;
+            compiled_valid_port_ranges = 0;
+            compiled_skipped_invalid_items = 0;
+            compiled_skipped_invalid_cidr_v4 = 0;
+            compiled_skipped_invalid_cidr_v6 = 0;
+            compiled_skipped_invalid_ports = 0;
 
             std::vector<RoutingRule> srcRules = routing.rules;
             if (routing.use_default_private) {
@@ -383,16 +446,22 @@ namespace Core {
                     CidrRuleV4 r{};
                     if (ParseCidrV4(cidr, &r)) {
                         cr.v4.push_back(r);
+                        compiled_valid_cidr_v4++;
                     } else {
                         Logger::Warn("路由规则: IPv4 CIDR 无效(" + cidr + "), rule=" + cr.raw.name);
+                        compiled_skipped_invalid_items++;
+                        compiled_skipped_invalid_cidr_v4++;
                     }
                 }
                 for (const auto& cidr : rule.ip_cidrs_v6) {
                     CidrRuleV6 r{};
                     if (ParseCidrV6(cidr, &r)) {
                         cr.v6.push_back(r);
+                        compiled_valid_cidr_v6++;
                     } else {
                         Logger::Warn("路由规则: IPv6 CIDR 无效(" + cidr + "), rule=" + cr.raw.name);
+                        compiled_skipped_invalid_items++;
+                        compiled_skipped_invalid_cidr_v6++;
                     }
                 }
                 for (const auto& d : rule.domains) {
@@ -403,8 +472,11 @@ namespace Core {
                     PortRange pr{};
                     if (ParsePortRange(p, &pr)) {
                         cr.port_ranges.push_back(pr);
+                        compiled_valid_port_ranges++;
                     } else {
                         Logger::Warn("路由规则: 端口范围无效(" + p + "), rule=" + cr.raw.name);
+                        compiled_skipped_invalid_items++;
+                        compiled_skipped_invalid_ports++;
                     }
                 }
                 for (const auto& proto : rule.protocols) {
@@ -437,6 +509,8 @@ namespace Core {
             std::string ipStr = ip;
             std::string hostStr = host;
             if (!hostStr.empty() && hostStr.back() == '.') hostStr.pop_back();
+            // 性能优化：域名匹配热路径避免重复 ToLower/分配；统一在此处转为小写
+            if (!hostStr.empty()) hostStr = ToLower(std::move(hostStr));
 
             const bool hasHost = !hostStr.empty();
             const bool hasIp = !ipStr.empty();
@@ -711,10 +785,32 @@ namespace Core {
                     if (pr.contains("allowed_ports") && pr["allowed_ports"].is_array()) {
                         rules.allowed_ports.clear();
                         for (const auto& p : pr["allowed_ports"]) {
+                            // WARN-1: 范围校验，避免 uint16_t 截断导致端口误判
+                            long long signedV = 0;
+                            unsigned long long unsignedV = 0;
+                            bool hasValue = false;
                             if (p.is_number_unsigned()) {
-                                rules.allowed_ports.push_back(static_cast<uint16_t>(p.get<unsigned int>()));
+                                unsignedV = p.get<unsigned long long>();
+                                hasValue = true;
+                            } else if (p.is_number_integer()) {
+                                signedV = p.get<long long>();
+                                hasValue = true;
+                            } else {
+                                continue;
                             }
+                            unsigned long long v = p.is_number_unsigned()
+                                                      ? unsignedV
+                                                      : (signedV < 0 ? 0ull : (unsigned long long)signedV);
+                            if (!hasValue || v == 0 || v > 65535) {
+                                Logger::Warn("配置: proxy_rules.allowed_ports 非法(" + std::to_string(v) + ")，已跳过 (有效范围: 1-65535)");
+                                continue;
+                            }
+                            rules.allowed_ports.push_back(static_cast<uint16_t>(v));
                         }
+                        // 去重 + 排序（热路径 binary_search 依赖）
+                        std::sort(rules.allowed_ports.begin(), rules.allowed_ports.end());
+                        rules.allowed_ports.erase(std::unique(rules.allowed_ports.begin(), rules.allowed_ports.end()),
+                                                  rules.allowed_ports.end());
                     }
                     // 解析 DNS 策略
                     rules.dns_mode = pr.value("dns_mode", "direct");
@@ -855,6 +951,15 @@ namespace Core {
                              ", child_injection_mode=" + childInjectionMode +
                              ", child_injection_exclude=" + std::to_string(childInjectionExclude.size()) +
                              ", traffic_logging=" + std::string(trafficLogging ? "true" : "false"));
+
+                // CRIT-1/2/WARN-3: 仅在 Load() 成功返回前输出“有效 CIDR 统计 + 跳过数量”，避免失败时误导
+                Logger::Info("路由规则: 编译统计: 有效 IPv4 CIDR=" + std::to_string(rules.compiled_valid_cidr_v4) +
+                             ", 有效 IPv6 CIDR 规则数量=" + std::to_string(rules.compiled_valid_cidr_v6) +
+                             ", 有效端口范围=" + std::to_string(rules.compiled_valid_port_ranges) +
+                             ", 跳过无效项=" + std::to_string(rules.compiled_skipped_invalid_items) +
+                             " (v4_cidr=" + std::to_string(rules.compiled_skipped_invalid_cidr_v4) +
+                             ", v6_cidr=" + std::to_string(rules.compiled_skipped_invalid_cidr_v6) +
+                             ", ports=" + std::to_string(rules.compiled_skipped_invalid_ports) + ")");
                 Logger::Info("配置加载成功。");
                 return true;
             } catch (const std::exception& e) {
