@@ -359,3 +359,54 @@ jobs:
         target_commitish: ${{ github.sha }}
         files: release-assets/**/*.zip
         body: ${{ steps.changelog.outputs.body }}
+
+    # 将版本号同步回 build.ps1 并提交到仓库
+    - name: 同步版本号到仓库
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -euo pipefail
+        
+        VERSION="${{ needs.build.outputs.release_version }}"
+        TAG="${{ needs.build.outputs.release_tag }}"
+        
+        if [ -z "$VERSION" ]; then
+          echo "::warning::版本号为空，跳过同步"
+          exit 0
+        fi
+        
+        echo "准备同步版本号: $VERSION"
+        
+        # 配置 git 用户身份
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        
+        # 获取默认分支名称
+        DEFAULT_BRANCH=$(git remote show origin | sed -n '/HEAD branch/s/.*: //p')
+        echo "默认分支: $DEFAULT_BRANCH"
+        
+        # 切换到默认分支并拉取最新代码
+        git fetch origin "$DEFAULT_BRANCH"
+        git checkout "$DEFAULT_BRANCH"
+        git pull origin "$DEFAULT_BRANCH"
+        
+        # 更新 build.ps1 中的版本号
+        if [ -f "build.ps1" ]; then
+          # 使用 sed 替换版本号行
+          sed -i -E "s/^\s*\\\$Version\s*=\s*\"[^\"]*\"/\$Version = \"$VERSION\"/" build.ps1
+          
+          # 检查是否有实际更改
+          if git diff --quiet build.ps1; then
+            echo "版本号已是最新 ($VERSION)，无需更新"
+            exit 0
+          fi
+          
+          echo "版本号已更新为: $VERSION"
+          git add build.ps1
+          git commit -m "chore: 同步版本号到 $TAG [skip ci]"
+          git push origin "$DEFAULT_BRANCH"
+          echo "✅ 版本号已同步到仓库"
+        else
+          echo "::warning::未找到 build.ps1 文件"
+        fi
