@@ -8,187 +8,199 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand minimalist">
-      <h1 class="brand-title">Antigravity</h1>
-      <p class="brand-subtitle">Config Lab · Gravity Ruleset</p>
+    <div class="brand">
+      <h1 class="brand-title">Antigravity Proxy</h1>
+      <p class="brand-subtitle">路由规则配置实验室</p>
     </div>
     <div class="topbar-actions">
-      <label class="file-button">
-        导入 config.json
+      <label class="file-button" title="导入 config.json">
+        <span>导入配置</span>
         <input id="configFile" type="file" accept="application/json" />
       </label>
       <button id="btnLoadExample" class="ghost">载入示例</button>
-      <button id="btnDownload" class="primary">导出并下载</button>
+      <button id="btnDownload" class="primary">导出配置</button>
     </div>
   </header>
 
   <main class="layout">
-    <section class="card">
-      <div class="card-header">
-        <h2>全局路由设置</h2>
-        <p>确定规则生效顺序与默认动作。</p>
-      </div>
-      <div class="form-grid compact">
-        <label class="field inline">
-          <input id="routingEnabled" type="checkbox" />
-          <span>启用路由</span>
-        </label>
-        <label class="field inline">
-          <input id="useDefaultPrivate" type="checkbox" />
-          <span>内置私网直连</span>
-        </label>
-        <label class="field">
-          <span>优先级模式</span>
-          <select id="priorityMode">
-            <option value="order">按列表顺序（直觉）</option>
-            <option value="number">按 priority 数值</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>默认动作</span>
-          <select id="defaultAction">
-            <option value="proxy">proxy</option>
-            <option value="direct">direct</option>
-          </select>
-        </label>
-      </div>
-      <p class="hint">勾选“内置私网直连”会自动加入 RFC1918、loopback、link-local 直连规则。</p>
-      <div id="priorityWarning" class="notice"></div>
-    </section>
-
-    <section class="card rule-section">
-      <div class="card-header">
-        <h2>规则管理</h2>
-        <p>左侧选择规则，右侧编辑详情。规则生效顺序由优先级模式决定。</p>
-      </div>
-      <div class="rule-layout">
-        <aside class="rule-list">
-          <div class="rule-list-toolbar">
-            <button id="btnAddRule">新增</button>
-            <button id="btnCloneRule">复制</button>
-            <button id="btnDeleteRule" class="danger">删除</button>
-          </div>
-          <ul id="ruleList"></ul>
-          <div class="rule-list-toolbar">
-            <button id="btnMoveUp">上移</button>
-            <button id="btnMoveDown">下移</button>
-          </div>
-        </aside>
-
-        <div class="rule-editor">
-          <div class="section-title">
-            <h3>规则详情</h3>
-            <p>编辑会实时更新规则列表。域名支持 .local 与 *.example.com。</p>
-          </div>
-          <div class="form-grid">
-            <label class="field">
-              <span>名称</span>
-              <input id="ruleName" type="text" />
+    
+    <!-- 全局设置区域 -->
+    <div style="display: grid; gap: 24px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));">
+      <section class="card">
+        <div class="card-header">
+          <h2>全局路由策略</h2>
+          <p>控制规则匹配的优先级模式与默认行为。</p>
+        </div>
+        <div class="card-body">
+          <div class="form-grid compact">
+            <label class="field inline">
+              <input id="routingEnabled" type="checkbox" />
+              <span>启用路由引擎</span>
+            </label>
+            <label class="field inline">
+              <input id="useDefaultPrivate" type="checkbox" />
+              <span>内置私网直连</span>
             </label>
             <label class="field">
-              <span>启用</span>
-              <input id="ruleEnabled" type="checkbox" />
-            </label>
-            <label class="field">
-              <span>动作</span>
-              <select id="ruleAction">
-                <option value="direct">direct</option>
-                <option value="proxy">proxy</option>
+              <span>优先级模式</span>
+              <select id="priorityMode">
+                <option value="order">按列表顺序 (从上至下)</option>
+                <option value="number">按 Priority 数值 (大号优先)</option>
               </select>
             </label>
             <label class="field">
-              <span>priority（数字模式）</span>
-              <input id="rulePriority" type="number" />
+              <span>默认动作</span>
+              <select id="defaultAction">
+                <option value="proxy">Proxy (代理)</option>
+                <option value="direct">Direct (直连)</option>
+              </select>
             </label>
           </div>
-          <div class="form-grid two">
+          <div id="priorityWarning" class="notice warn"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>上游代理设置</h2>
+          <p>配置 Antigravity 本身的出站代理。</p>
+        </div>
+        <div class="card-body">
+          <div class="form-grid">
             <label class="field">
-              <span>IPv4 CIDR（每行一条）</span>
-              <textarea id="ruleIpv4" rows="4"></textarea>
+              <span>协议类型</span>
+              <select id="proxyType">
+                <option value="socks5">SOCKS5</option>
+                <option value="http">HTTP</option>
+              </select>
             </label>
             <label class="field">
-              <span>IPv6 CIDR（每行一条）</span>
-              <textarea id="ruleIpv6" rows="4"></textarea>
+              <span>主机地址</span>
+              <input id="proxyHost" type="text" placeholder="127.0.0.1" />
+            </label>
+            <label class="field">
+              <span>端口</span>
+              <input id="proxyPort" type="number" placeholder="7890" />
             </label>
           </div>
-          <p class="hint">全量匹配建议填写：IPv4 = 0.0.0.0/0，IPv6 = ::/0。</p>
-          <div class="form-grid two">
-            <label class="field">
-              <span>域名通配符（每行一条）</span>
-              <textarea id="ruleDomains" rows="4"></textarea>
-            </label>
-            <label class="field">
-              <span>端口（如 443 或 10000-20000）</span>
-              <textarea id="rulePorts" rows="4"></textarea>
-            </label>
+        </div>
+      </section>
+    </div>
+
+    <!-- 规则编辑器 (Master-Detail) -->
+    <section class="card rule-section">
+      <div class="card-header">
+        <h2>规则管理</h2>
+        <p>左侧选择规则，右侧编辑详情。支持拖拽排序（仅顺序模式有效）。</p>
+      </div>
+      <div class="rule-layout">
+        <!-- 侧边栏：规则列表 -->
+        <aside class="rule-list-container">
+          <div class="rule-toolbar">
+            <button id="btnAddRule" class="ghost" title="新建规则">+ 新增</button>
+            <button id="btnCloneRule" class="ghost" title="复制当前规则">复制</button>
+            <button id="btnMoveUp" class="ghost" title="上移">↑</button>
+            <button id="btnMoveDown" class="ghost" title="下移">↓</button>
+            <button id="btnDeleteRule" class="danger" title="删除当前规则">×</button>
           </div>
-          <p class="hint">端口留空代表“全部端口”；域名留空只按 CIDR 匹配；域名填 * 可匹配全部域名。</p>
-          <div id="ruleRiskWarning" class="notice warn" style="display: none"></div>
-          <label class="field">
-            <span>协议（默认 tcp，可留空）</span>
-            <input id="ruleProtocols" type="text" placeholder="tcp" />
+          <ul id="ruleList">
+            <!-- 规则列表将由 JS 动态渲染 -->
+          </ul>
+        </aside>
+
+        <!-- 主区域：规则详情 -->
+        <div class="rule-editor-container">
+          <div id="ruleEditorForm">
+            <div class="form-grid">
+              <label class="field" style="grid-column: span 2;">
+                <span>规则名称</span>
+                <input id="ruleName" type="text" placeholder="rule-name" />
+              </label>
+              <label class="field">
+                <span>动作</span>
+                <select id="ruleAction">
+                  <option value="proxy">Proxy</option>
+                  <option value="direct">Direct</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Priority (权重)</span>
+                <input id="rulePriority" type="number" placeholder="0" />
+              </label>
+              <label class="field inline">
+                <input id="ruleEnabled" type="checkbox" />
+                <span>启用此规则</span>
+              </label>
+            </div>
+
+            <div style="margin-top: 20px; display: grid; gap: 20px; grid-template-columns: 1fr 1fr;">
+              <label class="field">
+                <span>IPv4 CIDR (每行一个)</span>
+                <textarea id="ruleIpv4" rows="5" placeholder="192.168.1.0/24"></textarea>
+              </label>
+              <label class="field">
+                <span>IPv6 CIDR (每行一个)</span>
+                <textarea id="ruleIpv6" rows="5" placeholder="::1/128"></textarea>
+              </label>
+            </div>
+
+            <div style="margin-top: 20px; display: grid; gap: 20px; grid-template-columns: 1fr 1fr;">
+              <label class="field">
+                <span>域名匹配 (每行一个)</span>
+                <textarea id="ruleDomains" rows="5" placeholder="example.com&#10;*.google.com&#10;.local"></textarea>
+              </label>
+              <label class="field">
+                <span>端口范围 (如 80, 443, 1000-2000)</span>
+                <textarea id="rulePorts" rows="5" placeholder="80&#10;443"></textarea>
+              </label>
+            </div>
+
+            <div style="margin-top: 20px;">
+              <label class="field">
+                <span>协议 (仅 TCP, 可留空)</span>
+                <input id="ruleProtocols" type="text" placeholder="tcp" />
+              </label>
+            </div>
+            
+            <div id="ruleRiskWarning" class="notice warn" style="display: none"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 测试工具 -->
+    <section class="card test-console">
+      <div class="card-header">
+        <h2>规则命中模拟测试</h2>
+        <p>验证当前配置对特定目标的路由决策（仅本地逻辑模拟）。</p>
+      </div>
+      <div class="card-body">
+        <div class="form-grid compact" style="align-items: end;">
+          <label class="field" style="flex: 2;">
+            <span>目标 Host / IP</span>
+            <input id="testHost" type="text" placeholder="api.example.com" />
           </label>
+          <label class="field">
+            <span>端口</span>
+            <input id="testPort" type="number" placeholder="443" />
+          </label>
+          <label class="field">
+            <span>协议</span>
+            <select id="testProto">
+              <option value="tcp">TCP</option>
+            </select>
+          </label>
+          <button id="btnTest" class="primary" style="height: 38px;">
+            <span>运行测试</span>
+          </button>
         </div>
+        <div id="testResult" class="test-output">等待测试...</div>
       </div>
     </section>
 
-    <section class="card">
-      <div class="card-header">
-        <h2>上游代理配置</h2>
-        <p>设置当前系统使用的代理地址与类型。</p>
-      </div>
-      <div class="form-grid">
-        <label class="field">
-          <span>代理类型</span>
-          <select id="proxyType">
-            <option value="socks5">socks5</option>
-            <option value="http">http</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>代理地址</span>
-          <input id="proxyHost" type="text" placeholder="127.0.0.1" />
-        </label>
-        <label class="field">
-          <span>代理端口</span>
-          <input id="proxyPort" type="number" placeholder="7890" />
-        </label>
-      </div>
-      <p class="hint">此处会写入 config.json 的 proxy.host / proxy.port / proxy.type。</p>
-    </section>
-
-    <section class="card">
-      <div class="card-header">
-        <h2>规则命中测试</h2>
-        <p>快速验证规则是否命中（只做本地匹配，不会发起真实网络请求）。</p>
-      </div>
-      <div class="form-grid">
-        <label class="field">
-          <span>目标 Host/IP</span>
-          <input id="testHost" type="text" placeholder="nas.local / 192.168.1.10" />
-        </label>
-        <label class="field">
-          <span>端口</span>
-          <input id="testPort" type="number" placeholder="443" />
-        </label>
-        <label class="field">
-          <span>协议</span>
-          <select id="testProto">
-            <option value="tcp">tcp</option>
-          </select>
-        </label>
-        <div class="field">
-          <span>&nbsp;</span>
-          <button id="btnTest" class="primary">测试</button>
-        </div>
-      </div>
-      <div id="testResult" class="result"></div>
-    </section>
   </main>
-
-  <footer class="footer">
-    <p>提示：规则优先级由“优先级模式”决定，请保持规则顺序和 priority 一致性。</p>
-  </footer>
+  
+  <div id="toastContainer" class="toast-container"></div>
 
   <script src="app.js"></script>
 </body>
