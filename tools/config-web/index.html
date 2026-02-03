@@ -3,56 +3,67 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Antigravity-Proxy 路由配置工具</title>
+  <title>ANTIGRAVITY // CONFIG_LAB</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <!-- Background Noise/Decorations -->
+  <div class="ascii-decor">
+    SYSTEM STATUS: ONLINE
+    KERNEL: v4.2.0-rc1
+    SECURITY: ENCRYPTED
+    CONNECT: SECURE
+    
+    // ANTIGRAVITY PROJECT
+    // COPYRIGHT 2026
+  </div>
+
   <header class="topbar">
     <div class="brand">
-      <h1 class="brand-title">Antigravity Proxy</h1>
-      <p class="brand-subtitle">路由规则配置实验室</p>
+      <h1 class="brand-title">ANTIGRAVITY<span style="color:var(--accent)">_PROXY</span></h1>
+      <p class="brand-subtitle">> ROUTING_CONFIGURATION_LAB</p>
     </div>
     <div class="topbar-actions">
-      <label class="file-button" title="导入 config.json">
-        <span>导入配置</span>
+      <label class="file-button" title="Import JSON Configuration">
+        <span>[ IMPORT ]</span>
         <input id="configFile" type="file" accept="application/json" />
       </label>
-      <button id="btnLoadExample" class="ghost">载入示例</button>
-      <button id="btnDownload" class="primary">导出配置</button>
+      <button id="btnLoadExample" class="ghost">[ RESET_DEFAULTS ]</button>
+      <button id="btnDownload" class="primary">[ EXPORT_CONFIG ]</button>
     </div>
   </header>
 
   <main class="layout">
     
-    <!-- 全局设置区域 -->
-    <div style="display: grid; gap: 24px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));">
+    <!-- Global Settings -->
+    <div style="display: grid; gap: 24px; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));">
       <section class="card">
         <div class="card-header">
-          <h2>全局路由策略</h2>
-          <p>控制规则匹配的优先级模式与默认行为。</p>
+          <h2>// GLOBAL_POLICY</h2>
+          <p>SYSTEM_BEHAVIOR_CONTROL</p>
         </div>
         <div class="card-body">
           <div class="form-grid compact">
             <label class="field inline">
               <input id="routingEnabled" type="checkbox" />
-              <span>启用路由引擎</span>
+              <span>ENABLE_ROUTING_ENGINE</span>
             </label>
             <label class="field inline">
               <input id="useDefaultPrivate" type="checkbox" />
-              <span>内置私网直连</span>
+              <span>BYPASS_PRIVATE_NETWORKS</span>
             </label>
             <label class="field">
-              <span>优先级模式</span>
+              <span>PRIORITY_MODE</span>
               <select id="priorityMode">
-                <option value="order">按列表顺序 (从上至下)</option>
-                <option value="number">按 Priority 数值 (大号优先)</option>
+                <option value="order">SEQUENTIAL (LIST_ORDER)</option>
+                <option value="number">NUMERIC (PRIORITY_VAL)</option>
               </select>
             </label>
             <label class="field">
-              <span>默认动作</span>
+              <span>DEFAULT_ACTION</span>
               <select id="defaultAction">
-                <option value="proxy">Proxy (代理)</option>
-                <option value="direct">Direct (直连)</option>
+                <option value="proxy">PROXY (TUNNEL)</option>
+                <option value="direct">DIRECT (BYPASS)</option>
               </select>
             </label>
           </div>
@@ -62,24 +73,24 @@
 
       <section class="card">
         <div class="card-header">
-          <h2>上游代理设置</h2>
-          <p>配置 Antigravity 本身的出站代理。</p>
+          <h2>// UPSTREAM_PROXY</h2>
+          <p>EGRESS_POINT_CONFIGURATION</p>
         </div>
         <div class="card-body">
           <div class="form-grid">
             <label class="field">
-              <span>协议类型</span>
+              <span>PROTOCOL</span>
               <select id="proxyType">
                 <option value="socks5">SOCKS5</option>
                 <option value="http">HTTP</option>
               </select>
             </label>
             <label class="field">
-              <span>主机地址</span>
+              <span>HOST</span>
               <input id="proxyHost" type="text" placeholder="127.0.0.1" />
             </label>
             <label class="field">
-              <span>端口</span>
+              <span>PORT</span>
               <input id="proxyPort" type="number" placeholder="7890" />
             </label>
           </div>
@@ -87,77 +98,77 @@
       </section>
     </div>
 
-    <!-- 规则编辑器 (Master-Detail) -->
+    <!-- Rule Editor -->
     <section class="card rule-section">
       <div class="card-header">
-        <h2>规则管理</h2>
-        <p>左侧选择规则，右侧编辑详情。支持拖拽排序（仅顺序模式有效）。</p>
+        <h2>// RULE_MANAGEMENT</h2>
+        <p>TRAFFIC_INTERCEPTION_LOGIC</p>
       </div>
       <div class="rule-layout">
-        <!-- 侧边栏：规则列表 -->
+        <!-- Sidebar -->
         <aside class="rule-list-container">
           <div class="rule-toolbar">
-            <button id="btnAddRule" class="ghost" title="新建规则">+ 新增</button>
-            <button id="btnCloneRule" class="ghost" title="复制当前规则">复制</button>
-            <button id="btnMoveUp" class="ghost" title="上移">↑</button>
-            <button id="btnMoveDown" class="ghost" title="下移">↓</button>
-            <button id="btnDeleteRule" class="danger" title="删除当前规则">×</button>
+            <button id="btnAddRule" class="ghost" title="Add New Rule">[ + ]</button>
+            <button id="btnCloneRule" class="ghost" title="Clone Selected">[ CLONE ]</button>
+            <button id="btnMoveUp" class="ghost" title="Move Up">[ ↑ ]</button>
+            <button id="btnMoveDown" class="ghost" title="Move Down">[ ↓ ]</button>
+            <button id="btnDeleteRule" class="danger" title="Delete Rule">[ X ]</button>
           </div>
           <ul id="ruleList">
-            <!-- 规则列表将由 JS 动态渲染 -->
+            <!-- Dynamic Content -->
           </ul>
         </aside>
 
-        <!-- 主区域：规则详情 -->
+        <!-- Detail Editor -->
         <div class="rule-editor-container">
           <div id="ruleEditorForm">
             <div class="form-grid">
               <label class="field" style="grid-column: span 2;">
-                <span>规则名称</span>
-                <input id="ruleName" type="text" placeholder="rule-name" />
+                <span>RULE_ID (NAME)</span>
+                <input id="ruleName" type="text" placeholder="rule_identifier" />
               </label>
               <label class="field">
-                <span>动作</span>
+                <span>ACTION</span>
                 <select id="ruleAction">
-                  <option value="proxy">Proxy</option>
-                  <option value="direct">Direct</option>
+                  <option value="proxy">PROXY</option>
+                  <option value="direct">DIRECT</option>
                 </select>
               </label>
               <label class="field">
-                <span>Priority (权重)</span>
+                <span>PRIORITY_VAL</span>
                 <input id="rulePriority" type="number" placeholder="0" />
               </label>
               <label class="field inline">
                 <input id="ruleEnabled" type="checkbox" />
-                <span>启用此规则</span>
+                <span>ACTIVE</span>
               </label>
             </div>
 
             <div style="margin-top: 20px; display: grid; gap: 20px; grid-template-columns: 1fr 1fr;">
               <label class="field">
-                <span>IPv4 CIDR (每行一个)</span>
+                <span>IPV4_CIDR_BLOCKS</span>
                 <textarea id="ruleIpv4" rows="5" placeholder="192.168.1.0/24"></textarea>
               </label>
               <label class="field">
-                <span>IPv6 CIDR (每行一个)</span>
+                <span>IPV6_CIDR_BLOCKS</span>
                 <textarea id="ruleIpv6" rows="5" placeholder="::1/128"></textarea>
               </label>
             </div>
 
             <div style="margin-top: 20px; display: grid; gap: 20px; grid-template-columns: 1fr 1fr;">
               <label class="field">
-                <span>域名匹配 (每行一个)</span>
-                <textarea id="ruleDomains" rows="5" placeholder="example.com&#10;*.google.com&#10;.local"></textarea>
+                <span>DOMAIN_PATTERNS</span>
+                <textarea id="ruleDomains" rows="5" placeholder="example.com&#10;*.corp.net"></textarea>
               </label>
               <label class="field">
-                <span>端口范围 (如 80, 443, 1000-2000)</span>
-                <textarea id="rulePorts" rows="5" placeholder="80&#10;443"></textarea>
+                <span>PORT_RANGES</span>
+                <textarea id="rulePorts" rows="5" placeholder="80&#10;443&#10;8000-9000"></textarea>
               </label>
             </div>
 
             <div style="margin-top: 20px;">
               <label class="field">
-                <span>协议 (仅 TCP, 可留空)</span>
+                <span>PROTOCOL (TCP_ONLY)</span>
                 <input id="ruleProtocols" type="text" placeholder="tcp" />
               </label>
             </div>
@@ -168,33 +179,33 @@
       </div>
     </section>
 
-    <!-- 测试工具 -->
+    <!-- Test Console -->
     <section class="card test-console">
       <div class="card-header">
-        <h2>规则命中模拟测试</h2>
-        <p>验证当前配置对特定目标的路由决策（仅本地逻辑模拟）。</p>
+        <h2>// SIMULATION_CONSOLE</h2>
+        <p>LOCAL_ROUTING_PREDICTION_SYSTEM</p>
       </div>
       <div class="card-body">
         <div class="form-grid compact" style="align-items: end;">
           <label class="field" style="flex: 2;">
-            <span>目标 Host / IP</span>
-            <input id="testHost" type="text" placeholder="api.example.com" />
+            <span>TARGET_HOST / IP</span>
+            <input id="testHost" type="text" placeholder="target.system.local" />
           </label>
           <label class="field">
-            <span>端口</span>
+            <span>PORT</span>
             <input id="testPort" type="number" placeholder="443" />
           </label>
           <label class="field">
-            <span>协议</span>
+            <span>PROTOCOL</span>
             <select id="testProto">
               <option value="tcp">TCP</option>
             </select>
           </label>
-          <button id="btnTest" class="primary" style="height: 38px;">
-            <span>运行测试</span>
+          <button id="btnTest" class="primary" style="height: 42px;">
+            <span>[ EXECUTE_TEST ]</span>
           </button>
         </div>
-        <div id="testResult" class="test-output">等待测试...</div>
+        <div id="testResult" class="test-output">_WAITING_FOR_INPUT...</div>
       </div>
     </section>
 

@@ -4,25 +4,31 @@ const ui = {
     const container = document.getElementById('toastContainer');
     const el = document.createElement('div');
     el.className = `toast ${type}`;
+    
+    // Cyberpunk timestamp
+    const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+    
     el.innerHTML = `
-      <span>${message}</span>
-      <button class="ghost" style="padding:4px; height:auto; color:inherit; opacity:0.7" onclick="this.parentElement.remove()">×</button>
+      <span><span style="opacity:0.6">[${time}]</span> ${message}</span>
+      <button class="ghost" style="padding:4px; height:auto; color:inherit; opacity:0.7" onclick="this.parentElement.remove()">[x]</button>
     `;
     container.appendChild(el);
     setTimeout(() => {
       el.style.animation = 'fadeOut 0.3s forwards';
       el.addEventListener('animationend', () => el.remove());
-    }, 3000);
+    }, 4000);
   },
   
   setLoading: (btn, isLoading, text = '') => {
     if (isLoading) {
       btn.dataset.originalText = btn.innerHTML;
       btn.disabled = true;
-      btn.innerHTML = `<span class="loader"></span> ${text || '处理中...'}`;
+      btn.innerHTML = `[ PROCESSING... ]`;
+      btn.classList.add('glitch-active');
     } else {
       btn.innerHTML = btn.dataset.originalText || btn.innerHTML;
       btn.disabled = false;
+      btn.classList.remove('glitch-active');
     }
   },
 
@@ -177,11 +183,11 @@ const renderRuleList = () => {
     const li = document.createElement("li");
     li.className = `rule-item ${idx === selectedIndex ? "active" : ""}`;
     const actionClass = rule.action === 'direct' ? 'success' : 'info'; // Use var colors logic via class? No, using badges.
-    const badgeStyle = rule.action === 'direct' ? 'color: var(--success)' : 'color: var(--info)';
+    const badgeStyle = rule.action === 'direct' ? 'color: var(--success); border-color: var(--success)' : 'color: var(--info); border-color: var(--info)';
     
     li.innerHTML = `
-      <span class="rule-item-name" title="${rule.name}">${rule.name || "(未命名)"}</span>
-      <span class="rule-item-badge" style="${badgeStyle}">${rule.action || "proxy"}</span>
+      <span class="rule-item-name" title="${rule.name}">> ${rule.name || "UNNAMED_RULE"}</span>
+      <span class="rule-item-badge" style="${badgeStyle}">${(rule.action || "proxy").toUpperCase()}</span>
     `;
     li.addEventListener("click", () => {
       if (selectedIndex === idx) return;
