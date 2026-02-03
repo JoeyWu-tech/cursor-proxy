@@ -203,6 +203,10 @@ jobs:
           out="${out%$'\n'}"
           [ -n "$out" ] && printf '%s' "$out"
         }
+
+        # Conventional Commits 正则：放入变量中，避免 bash 在 [[ ... =~ ... ]] 中将 ()/! 误解析为条件语法
+        CC_HEADER_RE='^[a-zA-Z]+(\([^)]+\))?(!)?:'
+        CC_FULL_RE='^([a-zA-Z]+)(\(([^)]+)\))?(!)?:[[:space:]]*(.+)$'
         
         # 创建临时文件存储各类型提交
         TMPDIR=$(mktemp -d)
@@ -230,7 +234,7 @@ jobs:
         
           # 若 subject 为空或不像 Conventional Commits，尝试从 body 提取第一条符合格式的行作为 subject
           promoted_subject=""
-          if [ -z "$subject" ] || ! [[ "$subject" =~ ^[a-zA-Z]+(\([^)]+\))?(!)?: ]]; then
+          if [ -z "$subject" ] || ! [[ "$subject" =~ $CC_HEADER_RE ]]; then
             new_body=""
             while IFS= read -r line; do
               line="$(trim "$line")"
@@ -240,7 +244,7 @@ jobs:
                 continue
               fi
         
-              if [ -z "$promoted_subject" ] && [[ "$line" =~ ^[a-zA-Z]+(\([^)]+\))?(!)?: ]]; then
+              if [ -z "$promoted_subject" ] && [[ "$line" =~ $CC_HEADER_RE ]]; then
                 promoted_subject="$(strip_inline_fence "$line")"
                 continue
               fi
@@ -257,7 +261,7 @@ jobs:
           subject="$(trim "$subject")"
         
           # 解析 Conventional Commits：type(scope)!: description
-          if [[ "$subject" =~ ^([a-zA-Z]+)(\(([^\)]+)\))?(!)?:[[:space:]]*(.+)$ ]]; then
+          if [[ "$subject" =~ $CC_FULL_RE ]]; then
             TYPE="${BASH_REMATCH[1],,}"
             SCOPE="$(trim "${BASH_REMATCH[3]}")"
             DESC="$(trim "${BASH_REMATCH[5]}")"
