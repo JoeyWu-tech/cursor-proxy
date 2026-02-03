@@ -403,7 +403,7 @@ static bool ShouldLogUdpBlock() {
     const int n = s_logCount.fetch_add(1, std::memory_order_relaxed);
     if (n < 20) return true; // 仅前 20 次输出详细阻断日志
     if (n == 20) {
-        Core::Logger::Warn("UDP 阻断日志过多，后续将仅在 [调试] 级别输出（避免 QUIC 重试导致日志/性能问题；注意：WSA错误码=10051 为策略阻断返回）");
+        Core::Logger::Warn("UDP 阻断日志过多，后续将仅在 [调试] 级别输出（避免 QUIC 重试导致日志/性能问题；注意：WSA错误码为策略阻断返回，并非真实网络故障）");
     }
     return Core::Logger::IsEnabled(Core::LogLevel::Debug);
 }
@@ -766,7 +766,7 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
             const bool hasPort = TryGetSockaddrPort(name, &dstPort);
             const bool allowUdp = IsSockaddrLoopback(name) || (hasPort && dstPort == 53);
             if (!allowUdp) {
-                const int err = WSAENETUNREACH;
+                const int err = WSAEACCES;
                 if (ShouldLogUdpBlock()) {
                     const std::string api = isWsa ? "WSAConnect" : "connect";
                     const std::string dst = SockaddrToString(name);
@@ -1389,7 +1389,7 @@ BOOL PASCAL DetourConnectEx(
             const bool hasPort = TryGetSockaddrPort(name, &dstPort);
             const bool allowUdp = IsSockaddrLoopback(name) || (hasPort && dstPort == 53);
             if (!allowUdp) {
-                const int err = WSAENETUNREACH;
+                const int err = WSAEACCES;
                 if (ShouldLogUdpBlock()) {
                     const std::string dst = SockaddrToString(name);
                     Core::Logger::Warn("ConnectEx: 已阻止 UDP 连接(策略: udp_mode=block, 说明: 禁用 QUIC/HTTP3), sock=" + std::to_string((unsigned long long)s) +
@@ -1764,8 +1764,11 @@ BOOL WINAPI DetourCreateProcessW(
              }
         }
         
-        // 检查是否在目标进程列表中
-        if (!config.ShouldInject(appName)) {
+        const bool excluded = config.IsChildInjectionExcluded(appName);
+        const bool shouldInject = (!excluded) && (config.childInjectionMode == "inherit" || config.ShouldInject(appName));
+
+        // 检查是否需要注入子进程（受 child_injection_mode/排除列表影响）
+        if (!shouldInject) {
             bool shouldLog = false;
             {
                 std::lock_guard<std::mutex> lock(g_loggedSkipProcessesMtx);
@@ -1779,8 +1782,13 @@ BOOL WINAPI DetourCreateProcessW(
                 }
             }
             if (shouldLog) {
-                Core::Logger::Info("[跳过] 非目标进程(仅首次记录): " + appName +
-                                  " (PID: " + std::to_string(lpProcessInformation->dwProcessId) + ")");
+                if (excluded) {
+                    Core::Logger::Info("[跳过] 子进程在 child_injection_exclude 列表(仅首次记录): " + appName +
+                                      " (PID: " + std::to_string(lpProcessInformation->dwProcessId) + ")");
+                } else {
+                    Core::Logger::Info("[跳过] child_injection_mode=filtered 非目标进程(仅首次记录): " + appName +
+                                      " (PID: " + std::to_string(lpProcessInformation->dwProcessId) + ")");
+                }
             }
             // 恢复进程（不注入）
             if (!(dwCreationFlags & CREATE_SUSPENDED)) {
@@ -1864,8 +1872,11 @@ BOOL WINAPI DetourCreateProcessA(
             if (firstSpace != std::string::npos) appName = appName.substr(0, firstSpace);
         }
         
-        // 检查是否在目标进程列表中
-        if (!config.ShouldInject(appName)) {
+        const bool excluded = config.IsChildInjectionExcluded(appName);
+        const bool shouldInject = (!excluded) && (config.childInjectionMode == "inherit" || config.ShouldInject(appName));
+
+        // 检查是否需要注入子进程（受 child_injection_mode/排除列表影响）
+        if (!shouldInject) {
             bool shouldLog = false;
             {
                 std::lock_guard<std::mutex> lock(g_loggedSkipProcessesMtx);
@@ -1879,8 +1890,13 @@ BOOL WINAPI DetourCreateProcessA(
                 }
             }
             if (shouldLog) {
-                Core::Logger::Info("[跳过] 非目标进程(仅首次记录): " + appName +
-                                  " (PID: " + std::to_string(lpProcessInformation->dwProcessId) + ")");
+                if (excluded) {
+                    Core::Logger::Info("[跳过] 子进程在 child_injection_exclude 列表(仅首次记录): " + appName +
+                                      " (PID: " + std::to_string(lpProcessInformation->dwProcessId) + ")");
+                } else {
+                    Core::Logger::Info("[跳过] child_injection_mode=filtered 非目标进程(仅首次记录): " + appName +
+                                      " (PID: " + std::to_string(lpProcessInformation->dwProcessId) + ")");
+                }
             }
             // 恢复进程（不注入）
             if (!(dwCreationFlags & CREATE_SUSPENDED)) {
@@ -1981,7 +1997,7 @@ int WSAAPI DetourSendTo(SOCKET s, const char* buf, int len, int flags, const str
             const bool hasPort = TryGetSockaddrPort(dst, &dstPort);
             const bool allowUdp = dst && (IsSockaddrLoopback(dst) || (hasPort && dstPort == 53));
             if (!allowUdp) {
-                const int err = WSAENETUNREACH;
+                const int err = WSAEACCES;
                 if (ShouldLogUdpBlock()) {
                     const std::string dstStr = dst ? SockaddrToString(dst) : std::string("(未知)");
                     Core::Logger::Warn("sendto: 已阻止 UDP 发送(策略: udp_mode=block, 说明: 禁用 QUIC/HTTP3), sock=" + std::to_string((unsigned long long)s) +
@@ -2027,7 +2043,7 @@ int WSAAPI DetourWSASendTo(
             const bool hasPort = TryGetSockaddrPort(dst, &dstPort);
             const bool allowUdp = dst && (IsSockaddrLoopback(dst) || (hasPort && dstPort == 53));
             if (!allowUdp) {
-                const int err = WSAENETUNREACH;
+                const int err = WSAEACCES;
                 if (lpNumberOfBytesSent) {
                     *lpNumberOfBytesSent = 0;
                 }

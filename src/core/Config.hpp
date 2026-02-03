@@ -59,6 +59,12 @@ namespace Core {
 
     class Config {
     private:
+        static std::string ToLowerCopy(std::string s) {
+            std::transform(s.begin(), s.end(), s.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+            return s;
+        }
+
         // 判断路径是否为绝对路径（Windows 盘符或 UNC 路径）
         static bool IsAbsolutePath(const std::string& path) {
             if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
@@ -102,6 +108,11 @@ namespace Core {
         ProxyRules rules;               // 代理路由规则
         bool trafficLogging = false;    // Phase 3: 是否启用流量监控日志
         bool childInjection = true;     // Phase 2: 是否自动注入子进程
+        // 子进程注入模式：
+        // - "filtered"（默认）：按 target_processes 过滤
+        // - "inherit"：注入所有子进程（可通过 child_injection_exclude 排除）
+        std::string childInjectionMode = "filtered";
+        std::vector<std::string> childInjectionExclude; // 进程排除列表（大小写不敏感，支持子串匹配）
         std::vector<std::string> targetProcesses; // 目标进程列表 (空=全部)
 
         // 检查进程名是否在目标列表中 (大小写不敏感)
@@ -110,14 +121,10 @@ namespace Core {
             if (targetProcesses.empty()) return true;
             
             // 将输入转为小写进行比较
-            std::string lowerName = processName;
-            std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), 
-                [](unsigned char c) { return std::tolower(c); });
+            std::string lowerName = ToLowerCopy(processName);
             
             for (const auto& target : targetProcesses) {
-                std::string lowerTarget = target;
-                std::transform(lowerTarget.begin(), lowerTarget.end(), lowerTarget.begin(),
-                    [](unsigned char c) { return std::tolower(c); });
+                std::string lowerTarget = ToLowerCopy(target);
                 
                 // 支持完全匹配或不带扩展名匹配
                 if (lowerName == lowerTarget) return true;
@@ -125,6 +132,26 @@ namespace Core {
                 if (lowerName.find(lowerTarget) != std::string::npos) return true;
             }
             return false;
+        }
+
+        bool IsChildInjectionExcluded(const std::string& processName) const {
+            if (childInjectionExclude.empty()) return false;
+            const std::string lowerName = ToLowerCopy(processName);
+            for (const auto& item : childInjectionExclude) {
+                const std::string lowerItem = ToLowerCopy(item);
+                if (lowerItem.empty()) continue;
+                if (lowerName == lowerItem) return true;
+                if (lowerName.find(lowerItem) != std::string::npos) return true;
+            }
+            return false;
+        }
+
+        bool ShouldInjectChildProcess(const std::string& processName) const {
+            if (IsChildInjectionExcluded(processName)) return false;
+            const std::string mode = ToLowerCopy(childInjectionMode);
+            if (mode == "inherit") return true;
+            // 默认/兜底：按 target_processes 过滤（保持历史行为）
+            return ShouldInject(processName);
         }
 
         static Config& Instance() {
@@ -285,6 +312,23 @@ namespace Core {
                 // Phase 2/3 配置项
                 trafficLogging = j.value("traffic_logging", false);
                 childInjection = j.value("child_injection", true);
+                // 子进程注入模式
+                childInjectionMode = j.value("child_injection_mode", childInjectionMode);
+                childInjectionMode = ToLowerCopy(childInjectionMode);
+                if (childInjectionMode.empty()) childInjectionMode = "filtered";
+                if (childInjectionMode != "filtered" && childInjectionMode != "inherit") {
+                    Logger::Warn("配置: child_injection_mode 无效(" + childInjectionMode + ")，已回退为 filtered (可选: filtered/inherit)");
+                    childInjectionMode = "filtered";
+                }
+                // 子进程注入排除列表
+                childInjectionExclude.clear();
+                if (j.contains("child_injection_exclude") && j["child_injection_exclude"].is_array()) {
+                    for (const auto& item : j["child_injection_exclude"]) {
+                        if (item.is_string()) {
+                            childInjectionExclude.push_back(item.get<std::string>());
+                        }
+                    }
+                }
 
                 // 目标进程列表
                 if (j.contains("target_processes") && j["target_processes"].is_array()) {
@@ -301,6 +345,8 @@ namespace Core {
                              " type=" + proxy.type +
                              ", fake_ip=" + std::string(fakeIp.enabled ? "true" : "false") +
                              ", child_injection=" + std::string(childInjection ? "true" : "false") +
+                             ", child_injection_mode=" + childInjectionMode +
+                             ", child_injection_exclude=" + std::to_string(childInjectionExclude.size()) +
                              ", traffic_logging=" + std::string(trafficLogging ? "true" : "false"));
                 Logger::Info("配置加载成功。");
                 return true;
