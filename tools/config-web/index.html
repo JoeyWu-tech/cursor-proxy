@@ -3,17 +3,17 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ANTIGRAVITY // CONFIG_LAB</title>
+  <title>Antigravity 配置实验室 // 路由规则</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <!-- Background Noise/Decorations -->
-  <div class="ascii-decor">
-    SYSTEM STATUS: ONLINE
-    KERNEL: v4.2.0-rc1
-    SECURITY: ENCRYPTED
-    CONNECT: SECURE
-    
+  <div class="ascii-decor" aria-hidden="true">
+    [SYSTEM ONLINE] 系统在线
+    KERNEL: v4.2.0-rc1 / 内核
+    SECURITY: ENCRYPTED / 已加密
+    CONNECT: SECURE / 安全链路
+
     // ANTIGRAVITY PROJECT
     // COPYRIGHT 2026
   </div>
@@ -21,79 +21,162 @@
   <header class="topbar">
     <div class="brand">
       <h1 class="brand-title">ANTIGRAVITY<span style="color:var(--accent)">_PROXY</span></h1>
-      <p class="brand-subtitle">> ROUTING_CONFIGURATION_LAB</p>
+      <p class="brand-subtitle">&gt; 路由规则配置实验室 / CONFIG_LAB</p>
     </div>
     <div class="topbar-actions">
-      <label class="file-button" title="Import JSON Configuration">
-        <span>[ IMPORT ]</span>
+      <label class="file-button" title="导入 config.json（只读取本地文件，不会上传）">
+        <span>[ 导入配置 ]</span>
         <input id="configFile" type="file" accept="application/json" />
       </label>
-      <button id="btnLoadExample" class="ghost">[ RESET_DEFAULTS ]</button>
-      <button id="btnDownload" class="primary">[ EXPORT_CONFIG ]</button>
+      <button id="btnLoadExample" class="ghost">[ 恢复默认 ]</button>
+      <button id="btnDownload" class="primary">[ 导出配置 ]</button>
     </div>
   </header>
 
   <main class="layout">
+
+    <!-- Quick Start (first-time user hint, controlled by app.js) -->
+    <section id="onboardingCard" class="card onboarding">
+      <div class="card-header">
+        <h2>// 快速入门 (QUICK_START)</h2>
+        <p>首次使用建议按步骤完成：导入 → 编辑 → 测试 → 导出</p>
+      </div>
+      <div class="card-body">
+        <ol class="steps">
+          <li><strong>导入配置</strong>：导入你现有的 <code>config.json</code>，或点“恢复默认”生成示例。</li>
+          <li><strong>编辑规则</strong>：选择左侧规则，右侧修改 CIDR / 域名 / 端口 / 动作。</li>
+          <li><strong>命中测试</strong>：在下方控制台输入目标 Host/IP 和端口，模拟 Connect 与 DNS 阶段的命中结果。</li>
+          <li><strong>导出配置</strong>：确认无误后点击“导出配置”，下载新的 <code>config.json</code>。</li>
+        </ol>
+        <div class="onboarding-actions">
+          <button id="btnOnboardingHide" class="ghost" type="button">[ 知道了 ]</button>
+          <button id="btnOnboardingNever" class="danger" type="button">[ 不再提示 ]</button>
+        </div>
+        <details class="learn-more">
+          <summary>了解更多：本工具会写入哪些字段？</summary>
+          <div class="learn-more-body">
+            <p>本工具只会在导出时写入：</p>
+            <ul>
+              <li><code>proxy_rules.routing</code>：路由规则、优先级模式、默认动作等。</li>
+              <li><code>proxy</code>：上游代理的 host/port/type。</li>
+            </ul>
+            <p>未导出前，一切修改都仅在浏览器内存中生效。</p>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <!-- One-click presets -->
+    <section class="card" id="presetCard">
+      <div class="card-header">
+        <h2>// 一键配置 (QUICK_PRESET)</h2>
+        <p>常见场景一键套用（会覆盖当前：全局策略 / 规则列表 / 上游代理）</p>
+      </div>
+      <div class="card-body">
+        <div class="template-grid">
+          <button class="template-btn" type="button" data-template="clash_default" aria-label="应用模板：Clash 本地代理（7890）">
+            <span class="template-title">Clash / 通用本地代理</span>
+            <span class="template-desc">SOCKS5 代理：127.0.0.1:7890；默认走代理</span>
+          </button>
+          <button class="template-btn" type="button" data-template="https_only_proxy" aria-label="应用模板：仅代理 HTTPS（443）">
+            <span class="template-title">仅代理 HTTPS</span>
+            <span class="template-desc">仅 443 端口走代理；其它端口直连（适合轻量场景）</span>
+          </button>
+          <button class="template-btn" type="button" data-template="lan_direct_proxy_else" aria-label="应用模板：局域网直连，其它走代理">
+            <span class="template-title">局域网直连，其它走代理</span>
+            <span class="template-desc">私网/本地域名直连；剩余默认走代理</span>
+          </button>
+          <button class="template-btn" type="button" data-template="direct_all" aria-label="应用模板：全直连（调试）">
+            <span class="template-title">全直连（调试）</span>
+            <span class="template-desc">默认直连；用于排查代理链路问题</span>
+          </button>
+        </div>
+        <p class="hint">提示：模板只是“填充页面参数”。只有点击“导出配置”后才会写入文件。</p>
+        <details class="learn-more">
+          <summary>了解更多：模板背后的规则是什么？</summary>
+          <div class="learn-more-body">
+            <ul>
+              <li><strong>Clash / 通用本地代理</strong>：将上游代理设置为 <code>127.0.0.1:7890</code>（SOCKS5），默认动作 proxy。</li>
+              <li><strong>仅代理 HTTPS</strong>：添加规则：端口 <code>443</code> + 域名 <code>*</code> → proxy；默认动作 direct。</li>
+              <li><strong>局域网直连，其它走代理</strong>：启用“内置私网直连”，并增加 <code>.local/.lan</code> 直连域名规则；默认动作 proxy。</li>
+              <li><strong>全直连（调试）</strong>：关闭路由规则的复杂性，默认动作 direct。</li>
+            </ul>
+          </div>
+        </details>
+      </div>
+    </section>
     
     <!-- Global Settings -->
     <div style="display: grid; gap: 24px; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));">
       <section class="card">
         <div class="card-header">
-          <h2>// GLOBAL_POLICY</h2>
-          <p>SYSTEM_BEHAVIOR_CONTROL</p>
+          <h2>// 全局策略 (GLOBAL_POLICY)</h2>
+          <p>控制规则生效方式、默认动作与兜底行为</p>
         </div>
         <div class="card-body">
           <div class="form-grid compact">
             <label class="field inline">
               <input id="routingEnabled" type="checkbox" />
-              <span>ENABLE_ROUTING_ENGINE</span>
+              <span>启用路由引擎 <span class="help" data-tip="关闭后不再按规则匹配，直接使用默认动作（通常为 proxy）。">?</span></span>
             </label>
             <label class="field inline">
               <input id="useDefaultPrivate" type="checkbox" />
-              <span>BYPASS_PRIVATE_NETWORKS</span>
+              <span>内置私网直连 <span class="help" data-tip="自动注入 RFC1918/loopback/link-local 等直连规则；无需手动写入 rules 列表。">?</span></span>
             </label>
             <label class="field">
-              <span>PRIORITY_MODE</span>
+              <span>优先级模式（PRIORITY_MODE） <span class="help" data-tip="顺序模式：从上到下；数值模式：priority 越大越优先。">?</span></span>
               <select id="priorityMode">
-                <option value="order">SEQUENTIAL (LIST_ORDER)</option>
-                <option value="number">NUMERIC (PRIORITY_VAL)</option>
+                <option value="order">按列表顺序（从上到下）</option>
+                <option value="number">按 priority 数值（越大越优先）</option>
               </select>
+              <p class="hint">推荐：新手先用“按列表顺序”。团队协作/大量规则再切到 priority 数值。</p>
             </label>
             <label class="field">
-              <span>DEFAULT_ACTION</span>
+              <span>默认动作（DEFAULT_ACTION） <span class="help" data-tip="当没有任何规则命中时，采用该动作作为兜底。">?</span></span>
               <select id="defaultAction">
-                <option value="proxy">PROXY (TUNNEL)</option>
-                <option value="direct">DIRECT (BYPASS)</option>
+                <option value="proxy">proxy（代理）</option>
+                <option value="direct">direct（直连）</option>
               </select>
+              <p class="hint">常用：默认 proxy，给直连/特殊目标单独写规则。</p>
             </label>
           </div>
           <div id="priorityWarning" class="notice warn"></div>
+          <details class="learn-more">
+            <summary>了解更多：两种优先级模式有什么区别？</summary>
+            <div class="learn-more-body">
+              <ul>
+                <li><strong>按列表顺序</strong>：规则从上到下依次匹配，先命中者生效；适合快速试错与小规模规则。</li>
+                <li><strong>按 priority 数值</strong>：priority 越大越优先，列表顺序只用于展示；适合多人维护与稳定排序。</li>
+              </ul>
+            </div>
+          </details>
         </div>
       </section>
 
       <section class="card">
         <div class="card-header">
-          <h2>// UPSTREAM_PROXY</h2>
-          <p>EGRESS_POINT_CONFIGURATION</p>
+          <h2>// 上游代理（UPSTREAM_PROXY）</h2>
+          <p>配置当前系统实际使用的代理地址（如 Clash / V2RayN）</p>
         </div>
         <div class="card-body">
           <div class="form-grid">
             <label class="field">
-              <span>PROTOCOL</span>
+              <span>代理协议（type） <span class="help" data-tip="常见：SOCKS5（Clash 默认 7890）或 HTTP（部分代理软件提供）。">?</span></span>
               <select id="proxyType">
-                <option value="socks5">SOCKS5</option>
-                <option value="http">HTTP</option>
+                <option value="socks5">SOCKS5 代理</option>
+                <option value="http">HTTP 代理</option>
               </select>
             </label>
             <label class="field">
-              <span>HOST</span>
+              <span>代理地址（host） <span class="help" data-tip="一般为 127.0.0.1（本机代理）或局域网网关 IP。">?</span></span>
               <input id="proxyHost" type="text" placeholder="127.0.0.1" />
             </label>
             <label class="field">
-              <span>PORT</span>
+              <span>代理端口（port） <span class="help" data-tip="常见：7890（Clash SOCKS5）、7891（Clash HTTP）。">?</span></span>
               <input id="proxyPort" type="number" placeholder="7890" />
             </label>
           </div>
+          <p class="hint">提示：这里写入 <code>config.json</code> 的 <code>proxy.host/proxy.port/proxy.type</code>。</p>
         </div>
       </section>
     </div>
@@ -101,18 +184,18 @@
     <!-- Rule Editor -->
     <section class="card rule-section">
       <div class="card-header">
-        <h2>// RULE_MANAGEMENT</h2>
-        <p>TRAFFIC_INTERCEPTION_LOGIC</p>
+        <h2>// 规则管理（RULE_MANAGEMENT）</h2>
+        <p>左侧选择规则，右侧编辑详情；顺序模式下可用上/下移调整生效顺序</p>
       </div>
       <div class="rule-layout">
         <!-- Sidebar -->
         <aside class="rule-list-container">
           <div class="rule-toolbar">
-            <button id="btnAddRule" class="ghost" title="Add New Rule">[ + ]</button>
-            <button id="btnCloneRule" class="ghost" title="Clone Selected">[ CLONE ]</button>
-            <button id="btnMoveUp" class="ghost" title="Move Up">[ ↑ ]</button>
-            <button id="btnMoveDown" class="ghost" title="Move Down">[ ↓ ]</button>
-            <button id="btnDeleteRule" class="danger" title="Delete Rule">[ X ]</button>
+            <button id="btnAddRule" class="ghost" type="button" title="新增规则" aria-label="新增规则">[ 新增 ]</button>
+            <button id="btnCloneRule" class="ghost" type="button" title="复制当前规则" aria-label="复制当前规则">[ 复制 ]</button>
+            <button id="btnMoveUp" class="ghost" type="button" title="上移（顺序模式）" aria-label="上移规则">[ 上移 ]</button>
+            <button id="btnMoveDown" class="ghost" type="button" title="下移（顺序模式）" aria-label="下移规则">[ 下移 ]</button>
+            <button id="btnDeleteRule" class="danger" type="button" title="删除规则（高风险）" aria-label="删除规则">[ 删除 ]</button>
           </div>
           <ul id="ruleList">
             <!-- Dynamic Content -->
@@ -124,56 +207,68 @@
           <div id="ruleEditorForm">
             <div class="form-grid">
               <label class="field" style="grid-column: span 2;">
-                <span>RULE_ID (NAME)</span>
-                <input id="ruleName" type="text" placeholder="rule_identifier" />
+                <span>规则名称（name） <span class="help" data-tip="仅用于展示与日志定位；建议用可读的名字，比如 lan-direct / https-proxy。">?</span></span>
+                <input id="ruleName" type="text" placeholder="例如：lan-direct / https-proxy" />
               </label>
               <label class="field">
-                <span>ACTION</span>
+                <span>动作（action） <span class="help" data-tip="命中该规则后执行的动作：proxy 走代理；direct 直连。">?</span></span>
                 <select id="ruleAction">
-                  <option value="proxy">PROXY</option>
-                  <option value="direct">DIRECT</option>
+                  <option value="proxy">proxy（代理）</option>
+                  <option value="direct">direct（直连）</option>
                 </select>
               </label>
               <label class="field">
-                <span>PRIORITY_VAL</span>
+                <span>priority（数值模式） <span class="help" data-tip="仅在“按 priority 数值”模式下生效；值越大越优先。">?</span></span>
                 <input id="rulePriority" type="number" placeholder="0" />
+                <p class="hint">建议：保留空间，如 100/200/300… 方便后续插入新规则。</p>
               </label>
               <label class="field inline">
                 <input id="ruleEnabled" type="checkbox" />
-                <span>ACTIVE</span>
+                <span>启用规则 <span class="help" data-tip="关闭后该规则将被跳过，不参与匹配。">?</span></span>
               </label>
             </div>
 
             <div style="margin-top: 20px; display: grid; gap: 20px; grid-template-columns: 1fr 1fr;">
               <label class="field">
-                <span>IPV4_CIDR_BLOCKS</span>
+                <span>IPv4 CIDR（每行一个） <span class="help" data-tip="示例：192.168.1.0/24；全量匹配可用 0.0.0.0/0。">?</span></span>
                 <textarea id="ruleIpv4" rows="5" placeholder="192.168.1.0/24"></textarea>
               </label>
               <label class="field">
-                <span>IPV6_CIDR_BLOCKS</span>
+                <span>IPv6 CIDR（每行一个） <span class="help" data-tip="示例：::1/128；全量匹配可用 ::/0。">?</span></span>
                 <textarea id="ruleIpv6" rows="5" placeholder="::1/128"></textarea>
               </label>
             </div>
 
             <div style="margin-top: 20px; display: grid; gap: 20px; grid-template-columns: 1fr 1fr;">
               <label class="field">
-                <span>DOMAIN_PATTERNS</span>
-                <textarea id="ruleDomains" rows="5" placeholder="example.com&#10;*.corp.net"></textarea>
+                <span>域名匹配（domains） <span class="help" data-tip="支持 .local / *.example.com / *（全匹配）。留空表示仅按 CIDR 匹配。">?</span></span>
+                <textarea id="ruleDomains" rows="5" placeholder=".local&#10;*.example.com&#10;*"></textarea>
+                <p class="hint">提示：填 <code>*</code> 表示匹配全部域名（请谨慎使用）。</p>
               </label>
               <label class="field">
-                <span>PORT_RANGES</span>
-                <textarea id="rulePorts" rows="5" placeholder="80&#10;443&#10;8000-9000"></textarea>
+                <span>端口（ports） <span class="help" data-tip="支持单端口（443）或范围（10000-20000）。留空表示“全部端口”。">?</span></span>
+                <textarea id="rulePorts" rows="5" placeholder="443&#10;10000-20000"></textarea>
               </label>
             </div>
 
             <div style="margin-top: 20px;">
               <label class="field">
-                <span>PROTOCOL (TCP_ONLY)</span>
+                <span>协议（protocols） <span class="help" data-tip="默认 tcp。当前实现仅支持 tcp；留空等同于 tcp。">?</span></span>
                 <input id="ruleProtocols" type="text" placeholder="tcp" />
               </label>
             </div>
             
             <div id="ruleRiskWarning" class="notice warn" style="display: none"></div>
+            <details class="learn-more">
+              <summary>了解更多：域名与端口的组合规则</summary>
+              <div class="learn-more-body">
+                <ul>
+                  <li><strong>域名留空</strong>：只按 CIDR 匹配。</li>
+                  <li><strong>端口留空</strong>：表示匹配全部端口。</li>
+                  <li><strong>域名填 *</strong>：匹配全部域名；建议配合端口或 CIDR 进一步收敛范围。</li>
+                </ul>
+              </div>
+            </details>
           </div>
         </div>
       </div>
@@ -182,30 +277,38 @@
     <!-- Test Console -->
     <section class="card test-console">
       <div class="card-header">
-        <h2>// SIMULATION_CONSOLE</h2>
-        <p>LOCAL_ROUTING_PREDICTION_SYSTEM</p>
+        <h2>// 规则命中测试（SIMULATION_CONSOLE）</h2>
+        <p>仅本地匹配模拟，不会发起真实网络请求</p>
       </div>
       <div class="card-body">
         <div class="form-grid compact" style="align-items: end;">
           <label class="field" style="flex: 2;">
-            <span>TARGET_HOST / IP</span>
-            <input id="testHost" type="text" placeholder="target.system.local" />
+            <span>目标 Host / IP <span class="help" data-tip="可填域名（nas.local）或 IP（192.168.1.10）。">?</span></span>
+            <input id="testHost" type="text" placeholder="nas.local / 192.168.1.10" />
           </label>
           <label class="field">
-            <span>PORT</span>
+            <span>端口 <span class="help" data-tip="Connect 阶段会使用端口匹配；DNS 阶段会以 port=0 模拟。">?</span></span>
             <input id="testPort" type="number" placeholder="443" />
           </label>
           <label class="field">
-            <span>PROTOCOL</span>
+            <span>协议</span>
             <select id="testProto">
               <option value="tcp">TCP</option>
             </select>
           </label>
           <button id="btnTest" class="primary" style="height: 42px;">
-            <span>[ EXECUTE_TEST ]</span>
+            <span>[ 执行测试 ]</span>
           </button>
         </div>
-        <div id="testResult" class="test-output">_WAITING_FOR_INPUT...</div>
+        <p class="hint">说明：Connect 阶段使用 (host, port) 匹配；DNS 阶段以 <code>port=0</code> 模拟解析期命中。</p>
+        <details class="learn-more">
+          <summary>了解更多：为什么要区分 Connect 与 DNS 阶段？</summary>
+          <div class="learn-more-body">
+            <p>某些规则会依赖端口（如仅代理 443）。DNS 解析阶段通常没有端口信息，因此这里用 <code>port=0</code> 进行近似模拟。</p>
+            <p>启用 FakeIP 时，DNS 阶段与 connect 阶段的行为可能不同；请结合运行日志确认最终效果。</p>
+          </div>
+        </details>
+        <div id="testResult" class="test-output">_等待输入...</div>
       </div>
     </section>
 

@@ -1,29 +1,43 @@
 // UI/UX Helpers
 const ui = {
-  toast: (message, type = 'info') => {
-    const container = document.getElementById('toastContainer');
-    const el = document.createElement('div');
+  toast: (message, type = "info") => {
+    const container = document.getElementById("toastContainer");
+    if (!container) {
+      // 兜底：避免用户无感知（极少数情况 DOM 结构被改动）
+      try {
+        alert(String(message));
+      } catch (_) {}
+      return;
+    }
+
+    const el = document.createElement("div");
     el.className = `toast ${type}`;
-    
-    // Cyberpunk timestamp
-    const time = new Date().toLocaleTimeString('en-US', { hour12: false });
-    
+
+    // 时间戳：终端日志风格（24h）
+    const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+
     el.innerHTML = `
-      <span><span style="opacity:0.6">[${time}]</span> ${message}</span>
-      <button class="ghost" style="padding:4px; height:auto; color:inherit; opacity:0.7" onclick="this.parentElement.remove()">[x]</button>
+      <span><span style="opacity:0.6">[${time}]</span> ${String(message)}</span>
+      <button class="ghost" type="button" aria-label="关闭通知" style="padding:4px; height:auto; color:inherit; opacity:0.7" onclick="this.parentElement.remove()">[关闭]</button>
     `;
+
     container.appendChild(el);
+
     setTimeout(() => {
-      el.style.animation = 'fadeOut 0.3s forwards';
-      el.addEventListener('animationend', () => el.remove());
+      el.style.animation = "fadeOut 0.3s forwards";
+      el.addEventListener("animationend", () => el.remove(), { once: true });
+      // 兜底：若 animationend 未触发，最多 0.5s 后强制回收
+      setTimeout(() => el.remove(), 500);
     }, 4000);
   },
   
-  setLoading: (btn, isLoading, text = '') => {
+  setLoading: (btn, isLoading, text = "") => {
+    if (!btn) return;
     if (isLoading) {
       btn.dataset.originalText = btn.innerHTML;
       btn.disabled = true;
-      btn.innerHTML = `[ PROCESSING... ]`;
+      const label = (text || "处理中…").trim();
+      btn.innerHTML = `[ ${label} ]`;
       btn.classList.add('glitch-active');
     } else {
       btn.innerHTML = btn.dataset.originalText || btn.innerHTML;
@@ -182,12 +196,17 @@ const renderRuleList = () => {
   routing.rules.forEach((rule, idx) => {
     const li = document.createElement("li");
     li.className = `rule-item ${idx === selectedIndex ? "active" : ""}`;
-    const actionClass = rule.action === 'direct' ? 'success' : 'info'; // Use var colors logic via class? No, using badges.
-    const badgeStyle = rule.action === 'direct' ? 'color: var(--success); border-color: var(--success)' : 'color: var(--info); border-color: var(--info)';
-    
+    const action = String(rule.action || "proxy").toLowerCase();
+    const name = (String(rule.name || "").trim() || "未命名规则").slice(0, 80);
+    const actionLabel = action === "direct" ? "直连(DIRECT)" : "代理(PROXY)";
+    const badgeStyle =
+      action === "direct"
+        ? "color: var(--success); border-color: var(--success)"
+        : "color: var(--info); border-color: var(--info)";
+
     li.innerHTML = `
-      <span class="rule-item-name" title="${rule.name}">> ${rule.name || "UNNAMED_RULE"}</span>
-      <span class="rule-item-badge" style="${badgeStyle}">${(rule.action || "proxy").toUpperCase()}</span>
+      <span class="rule-item-name" title="${name}">&gt; ${name}</span>
+      <span class="rule-item-badge" style="${badgeStyle}">${actionLabel}</span>
     `;
     li.addEventListener("click", () => {
       if (selectedIndex === idx) return;
@@ -242,7 +261,10 @@ const renderRuleRiskWarning = () => {
   
   if (action === "direct" && hasDomains && hasPorts) {
     el.style.display = "block";
-    el.innerHTML = "<strong>⚠️ 潜在冲突风险</strong><br>Direct + Domain + Port 组合在 FakeIP 模式下可能无效。建议移除端口限制或仅使用 IP 规则。";
+    el.innerHTML =
+      "<strong>⚠️ 风险提示</strong><br>" +
+      "当前规则为 <code>direct + domains + ports</code>。启用 FakeIP 时，该组合可能导致解析阶段与连接阶段行为不一致。" +
+      " 建议：移除 <code>ports</code> 限制，或改用 CIDR/IP 规则收敛范围。";
     return;
   }
   el.style.display = "none";
@@ -280,7 +302,10 @@ const syncGlobalFromEditor = () => {
 };
 
 // Operations
-const loadConfig = async (json) => {
+const loadConfig = async (json, options = {}) => {
+  const silent = options?.silent === true;
+  const toastMessage = options?.toastMessage;
+
   // Simulate loading
   isListLoading = true;
   renderRuleList();
@@ -298,7 +323,9 @@ const loadConfig = async (json) => {
   renderRuleList();
   renderRuleEditor();
   
-  ui.toast("配置已载入", "success");
+  if (!silent) {
+    ui.toast(toastMessage || "配置已载入", "success");
+  }
 };
 
 const downloadConfig = async () => {
@@ -349,6 +376,176 @@ const downloadConfig = async () => {
   } finally {
     ui.setLoading(elements.btnDownload, false);
   }
+};
+
+// -----------------------------
+// 一键模板（Quick Presets）
+// -----------------------------
+const PRESET_TEMPLATES = {
+  clash_default: {
+    name: "Clash / 通用本地代理（127.0.0.1:7890）",
+    proxy: { type: "socks5", host: "127.0.0.1", port: 7890 },
+    routing: {
+      enabled: true,
+      priority_mode: "order",
+      default_action: "proxy",
+      use_default_private: true,
+      rules: [
+        {
+          name: "lan-domain-direct",
+          enabled: true,
+          action: "direct",
+          priority: 10,
+          ip_cidrs_v4: [],
+          ip_cidrs_v6: [],
+          domains: [".local", ".lan"],
+          ports: [],
+          protocols: ["tcp"],
+        },
+      ],
+    },
+  },
+
+  https_only_proxy: {
+    name: "仅代理 HTTPS（443）",
+    proxy: { type: "socks5", host: "127.0.0.1", port: 7890 },
+    routing: {
+      enabled: true,
+      priority_mode: "order",
+      default_action: "direct",
+      use_default_private: true,
+      rules: [
+        {
+          name: "https-proxy",
+          enabled: true,
+          action: "proxy",
+          priority: 100,
+          ip_cidrs_v4: [],
+          ip_cidrs_v6: [],
+          domains: ["*"],
+          ports: ["443"],
+          protocols: ["tcp"],
+        },
+        {
+          name: "lan-domain-direct",
+          enabled: true,
+          action: "direct",
+          priority: 10,
+          ip_cidrs_v4: [],
+          ip_cidrs_v6: [],
+          domains: [".local", ".lan"],
+          ports: [],
+          protocols: ["tcp"],
+        },
+      ],
+    },
+  },
+
+  lan_direct_proxy_else: {
+    name: "局域网直连，其它走代理",
+    proxy: { type: "socks5", host: "127.0.0.1", port: 7890 },
+    routing: {
+      enabled: true,
+      priority_mode: "order",
+      default_action: "proxy",
+      use_default_private: true,
+      rules: [
+        {
+          name: "lan-domain-direct",
+          enabled: true,
+          action: "direct",
+          priority: 10,
+          ip_cidrs_v4: [],
+          ip_cidrs_v6: [],
+          domains: [".local", ".lan"],
+          ports: [],
+          protocols: ["tcp"],
+        },
+      ],
+    },
+  },
+
+  direct_all: {
+    name: "全直连（调试）",
+    proxy: { type: "socks5", host: "127.0.0.1", port: 7890 },
+    routing: {
+      enabled: true,
+      priority_mode: "order",
+      default_action: "direct",
+      use_default_private: false,
+      rules: [],
+    },
+  },
+};
+
+const applyPresetTemplate = (templateId) => {
+  const tpl = PRESET_TEMPLATES[templateId];
+  if (!tpl) {
+    ui.toast(`未知模板：${templateId || "(空)"}`, "error");
+    return;
+  }
+
+  const ok = confirm(
+    `应用模板【${tpl.name}】将覆盖当前：全局策略 / 规则列表 / 上游代理。\n\n建议：先导出一份备份。\n\n是否继续？`
+  );
+  if (!ok) {
+    ui.toast("已取消应用模板", "warning");
+    return;
+  }
+
+  // 仅覆盖 proxy + routing，其它字段保持原样（避免破坏导入配置的其它模块）
+  if (!baseConfig || typeof baseConfig !== "object") baseConfig = {};
+  if (!baseConfig.proxy || typeof baseConfig.proxy !== "object") baseConfig.proxy = {};
+  baseConfig.proxy.type = tpl.proxy.type;
+  baseConfig.proxy.host = tpl.proxy.host;
+  baseConfig.proxy.port = tpl.proxy.port;
+
+  routing = normalizeRouting(tpl.routing);
+  selectedIndex = 0;
+
+  renderGlobal();
+  renderProxy();
+  renderRuleList();
+  renderRuleEditor();
+
+  ui.toast(`已应用模板：${tpl.name}`, "success");
+};
+
+// -----------------------------
+// 首次使用引导（Quick Start）
+// -----------------------------
+const initOnboarding = () => {
+  const card = $("onboardingCard");
+  if (!card) return;
+
+  const KEY = "ag_configlab_onboarding_hidden_v1";
+  let hidden = false;
+  try {
+    hidden = localStorage.getItem(KEY) === "1";
+  } catch (_) {
+    hidden = false;
+  }
+
+  if (hidden) {
+    card.style.display = "none";
+    return;
+  }
+
+  const btnHide = $("btnOnboardingHide");
+  const btnNever = $("btnOnboardingNever");
+
+  btnHide?.addEventListener("click", () => {
+    card.style.display = "none";
+    ui.toast("已隐藏快速入门（刷新后可能再次出现）");
+  });
+
+  btnNever?.addEventListener("click", () => {
+    try {
+      localStorage.setItem(KEY, "1");
+    } catch (_) {}
+    card.style.display = "none";
+    ui.toast("后续将不再显示快速入门", "success");
+  });
 };
 
 // Matchers (Preserved logic)
@@ -419,7 +616,7 @@ const bindEvents = () => {
     reader.onload = () => {
       try {
         const json = JSON.parse(reader.result);
-        loadConfig(json);
+        loadConfig(json, { toastMessage: "已导入配置" });
       } catch (err) {
         ui.toast("JSON 解析失败: " + err.message, "error");
       }
@@ -436,15 +633,14 @@ const bindEvents = () => {
   });
 
   elements.btnLoadExample.addEventListener("click", () => {
-    routing = defaultRouting();
-    loadConfig({}); // Reload with defaults
+    loadConfig({}, { toastMessage: "已恢复默认示例" });
   });
 
   // Global Settings Changes
   [elements.routingEnabled, elements.priorityMode, elements.defaultAction, elements.useDefaultPrivate]
     .forEach(el => el.addEventListener("change", () => {
       syncGlobalFromEditor();
-      ui.toast("全局设置已更新");
+      ui.toast("全局策略已更新（未导出）");
     }));
 
   // Editor Changes
@@ -462,32 +658,37 @@ const bindEvents = () => {
     // Scroll list to bottom
     const list = elements.ruleList.parentElement; // .rule-list-container #ruleList
     list.scrollTop = list.scrollHeight;
-    ui.toast("新规则已添加");
+    ui.toast("已新增规则", "success");
   });
 
   elements.btnCloneRule.addEventListener("click", () => {
     const rule = routing.rules[selectedIndex];
     if (!rule) return;
     const clone = JSON.parse(JSON.stringify(rule));
-    clone.name = `${rule.name}-copy`;
+    clone.name = `${rule.name || "rule"}-副本`;
     routing.rules.push(clone);
     selectedIndex = routing.rules.length - 1;
     renderRuleList();
     renderRuleEditor();
-    ui.toast("规则已复制");
+    ui.toast("已复制规则", "success");
   });
 
   elements.btnDeleteRule.addEventListener("click", () => {
     if (routing.rules.length === 0) return;
-    if (!confirm("确定要删除此规则吗？")) return;
-    
+    const rule = routing.rules[selectedIndex];
+    const name = (rule?.name || "未命名规则").toString();
+    const ok1 = confirm(`高风险操作：删除规则【${name}】将无法恢复。\n\n确认继续？`);
+    if (!ok1) return;
+    const ok2 = confirm("请再次确认：真的要删除吗？");
+    if (!ok2) return;
+
     routing.rules.splice(selectedIndex, 1);
     selectedIndex = Math.min(selectedIndex, routing.rules.length - 1);
     if (selectedIndex < 0) selectedIndex = 0;
     
     renderRuleList();
     renderRuleEditor();
-    ui.toast("规则已删除");
+    ui.toast(`已删除规则：${name}`, "warning");
   });
 
   elements.btnMoveUp.addEventListener("click", () => {
@@ -513,11 +714,11 @@ const bindEvents = () => {
   elements.btnTest.addEventListener("click", async () => {
     const host = elements.testHost.value.trim();
     if (!host) {
-      ui.toast("请输入测试 Host", "warning");
+      ui.toast("请输入目标 Host / IP", "warning");
       return;
     }
     
-    ui.setLoading(elements.btnTest, true, "测试中...");
+    ui.setLoading(elements.btnTest, true, "测试中…");
     
     // Fake async delay for consistency
     await new Promise(r => setTimeout(r, 400));
@@ -525,38 +726,28 @@ const bindEvents = () => {
     const port = parseInt(elements.testPort.value || "0", 10);
     const proto = elements.testProto.value;
 
-    // We can reuse matchRouting logic if we bring it fully, 
-    // or just assume the previous logic works. Ideally I'd include the full match logic here.
-    // Re-implementing a simplified match for demo purposes since the original code had it.
-    
-    // ... Re-inserting match logic helper ...
-    const match = (h, p, pr) => {
-        // Logic from previous file but wrapped inside this scope or moved out
-        // For brevity in this response, I assume the matchRouting function exists or I inline it.
-        // I will inline a simplified version for now to ensure it works without external deps.
-        
-        // (Copied from previous app.js logic, condensed)
-        // ...
-        return { action: "proxy", rule: "Simulated Match" }; // Placeholder if logic missing
-    };
-
     // Use the function defined below (I'll add it back)
     const resultConnect = matchRouting(host, port, proto);
     const resultDns = matchRouting(host, 0, proto);
 
     elements.testResult.innerHTML = `
-      <div style="color: var(--success)">[Connect Stage] ${resultConnect.action.toUpperCase()} <span style="color:var(--muted)">by ${resultConnect.rule}</span></div>
-      <div style="color: var(--info)">[DNS Stage] ${resultDns.action.toUpperCase()} <span style="color:var(--muted)">by ${resultDns.rule}</span></div>
+      <div style="color: var(--success)">[连接阶段] ${String(resultConnect.action || "").toUpperCase()} <span style="color:var(--muted)">命中：${resultConnect.rule}</span></div>
+      <div style="color: var(--info)">[DNS 阶段(模拟 port=0)] ${String(resultDns.action || "").toUpperCase()} <span style="color:var(--muted)">命中：${resultDns.rule}</span></div>
     `;
     
     ui.setLoading(elements.btnTest, false);
+  });
+
+  // One-click templates
+  document.querySelectorAll(".template-btn").forEach((btn) => {
+    btn.addEventListener("click", () => applyPresetTemplate(btn.dataset.template));
   });
 };
 
 
 // --- Missing Match Logic (Restored) ---
 const matchRouting = (host, port, proto) => {
-  if (!routing.enabled) return { action: "proxy", rule: "(disabled)" };
+  if (!routing.enabled) return { action: routing.default_action || "proxy", rule: "(disabled)" };
   
   // Sort if needed (but current implementation of getEffectiveRules handles it)
   let rules = routing.rules.slice();
@@ -606,8 +797,9 @@ const matchRouting = (host, port, proto) => {
 
 // Init
 const init = () => {
-  loadConfig({});
+  loadConfig({}, { silent: true });
   bindEvents();
+  initOnboarding();
 };
 
 init();
