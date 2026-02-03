@@ -3,10 +3,48 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Antigravity 配置实验室 // 路由规则</title>
+  <title>Antigravity 配置实验室 // CONFIG_LAB</title>
   <link rel="stylesheet" href="style.css" />
+
+  <!-- TailwindCSS (CDN, required) -->
+  <script>
+    // Tailwind CDN: expose a minimal config so we can use CSS variables consistently.
+    // Note: 禁止 inline style 指的是 HTML 的 style="" 属性；这里是脚本配置，不属于该范畴。
+    tailwind = {
+      config: {
+        theme: {
+          extend: {
+            colors: {
+              ag: {
+                bg: "var(--bg)",
+                surface1: "var(--surface-1)",
+                surface2: "var(--surface-2)",
+                surface3: "var(--surface-3)",
+                border: "var(--border)",
+                text: "var(--text)",
+                textMain: "var(--text-main)",
+                muted: "var(--muted)",
+                primary: "var(--primary)",
+                secondary: "var(--secondary)",
+                accent: "var(--accent)",
+                warning: "var(--warning)",
+                danger: "var(--danger)",
+              },
+            },
+            fontFamily: {
+              mono: ["var(--font-mono)"],
+            },
+          },
+        },
+      },
+    };
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Icons (CDN, required) -->
+  <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
 </head>
-<body>
+<body class="min-h-screen font-mono">
   <!-- Background Noise/Decorations -->
   <div class="ascii-decor" aria-hidden="true">
     [SYSTEM ONLINE] 系统在线
@@ -18,299 +56,587 @@
     // COPYRIGHT 2026
   </div>
 
-  <header class="topbar">
-    <div class="brand">
-      <h1 class="brand-title">ANTIGRAVITY<span style="color:var(--accent)">_PROXY</span></h1>
-      <p class="brand-subtitle">&gt; 路由规则配置实验室 / CONFIG_LAB</p>
-    </div>
-    <div class="topbar-actions">
-      <label class="file-button" title="导入 config.json（只读取本地文件，不会上传）">
-        <span>[ 导入配置 ]</span>
-        <input id="configFile" type="file" accept="application/json" />
-      </label>
-      <button id="btnLoadExample" class="ghost">[ 恢复默认 ]</button>
-      <button id="btnDownload" class="primary">[ 导出配置 ]</button>
+  <!-- Header -->
+  <header class="sticky top-0 z-[100] border-b border-ag-border bg-[var(--glass-bg)] backdrop-blur">
+    <div class="mx-auto flex max-w-[1400px] flex-col gap-3 px-4 py-4 md:flex-row md:items-center md:justify-between">
+      <div class="min-w-0">
+        <div class="flex items-baseline gap-2">
+          <h1 class="truncate text-lg font-bold tracking-widest text-ag-primary">
+            ANTIGRAVITY<span class="text-ag-accent">_PROXY</span>
+          </h1>
+          <span class="hidden text-xs tracking-[0.25em] text-ag-muted md:inline">CONFIG_LAB</span>
+        </div>
+        <p class="mt-1 text-xs tracking-[0.18em] text-ag-accent">
+          &gt; 配置实验室 / CONFIG_LAB
+        </p>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2">
+        <label class="ag-btn ag-btn-ghost" title="导入 config.json（只读取本地文件，不会上传）">
+          <iconify-icon icon="mdi:upload" class="text-base"></iconify-icon>
+          <span>导入</span>
+          <input id="configFile" class="hidden" type="file" accept="application/json" />
+        </label>
+
+        <button id="btnLoadExample" class="ag-btn ag-btn-ghost" type="button" title="恢复默认（高风险）">
+          <iconify-icon icon="mdi:restore" class="text-base"></iconify-icon>
+          <span>恢复默认</span>
+        </button>
+
+        <button id="btnDownload" class="ag-btn ag-btn-primary" type="button" title="导出 config.json">
+          <iconify-icon icon="mdi:download" class="text-base"></iconify-icon>
+          <span>导出配置</span>
+        </button>
+      </div>
     </div>
   </header>
 
-  <main class="layout">
+  <main class="mx-auto grid max-w-[1400px] grid-cols-1 gap-6 px-4 py-6 lg:grid-cols-[280px_1fr]">
 
-    <!-- Quick Start (first-time user hint, controlled by app.js) -->
-    <section id="onboardingCard" class="card onboarding">
-      <div class="card-header">
-        <h2>// 快速入门 (QUICK_START)</h2>
-        <p>首次使用建议按步骤完成：导入 → 编辑 → 测试 → 导出</p>
-      </div>
-      <div class="card-body">
-        <ol class="steps">
-          <li><strong>导入配置</strong>：导入你现有的 <code>config.json</code>，或点“恢复默认”生成示例。</li>
-          <li><strong>编辑规则</strong>：选择左侧规则，右侧修改 CIDR / 域名 / 端口 / 动作。</li>
-          <li><strong>命中测试</strong>：在下方控制台输入目标 Host/IP 和端口，模拟 Connect 与 DNS 阶段的命中结果。</li>
-          <li><strong>导出配置</strong>：确认无误后点击“导出配置”，下载新的 <code>config.json</code>。</li>
-        </ol>
-        <div class="onboarding-actions">
-          <button id="btnOnboardingHide" class="ghost" type="button">[ 知道了 ]</button>
-          <button id="btnOnboardingNever" class="danger" type="button">[ 不再提示 ]</button>
+    <!-- Left navigation -->
+    <aside class="card p-4">
+      <div class="mb-3 flex items-center justify-between">
+        <div class="text-xs tracking-[0.18em] text-ag-muted">NAVIGATION</div>
+        <div id="dirtyBadge" class="hidden rounded border border-ag-warning px-2 py-1 text-[10px] tracking-widest text-ag-warning">
+          DIRTY
         </div>
-        <details class="learn-more">
-          <summary>了解更多：本工具会写入哪些字段？</summary>
-          <div class="learn-more-body">
-            <p>本工具只会在导出时写入：</p>
-            <ul>
-              <li><code>proxy_rules.routing</code>：路由规则、优先级模式、默认动作等。</li>
-              <li><code>proxy</code>：上游代理的 host/port/type。</li>
-            </ul>
-            <p>未导出前，一切修改都仅在浏览器内存中生效。</p>
-          </div>
-        </details>
       </div>
-    </section>
 
-    <!-- One-click presets -->
-    <section class="card" id="presetCard">
-      <div class="card-header">
-        <h2>// 一键配置 (QUICK_PRESET)</h2>
-        <p>常见场景一键套用（会覆盖当前：全局策略 / 规则列表 / 上游代理）</p>
+      <nav id="sideNav" class="flex flex-col gap-1">
+        <button class="nav-item" type="button" data-section="overview">
+          <iconify-icon icon="mdi:view-dashboard-outline" class="text-lg"></iconify-icon>
+          <span class="flex-1 text-left">概览</span>
+          <span class="nav-kbd">OVERVIEW</span>
+        </button>
+        <button class="nav-item" type="button" data-section="proxy">
+          <iconify-icon icon="mdi:swap-horizontal" class="text-lg"></iconify-icon>
+          <span class="flex-1 text-left">代理与日志</span>
+          <span class="nav-kbd">PROXY</span>
+        </button>
+        <button class="nav-item" type="button" data-section="network">
+          <iconify-icon icon="mdi:shield-outline" class="text-lg"></iconify-icon>
+          <span class="flex-1 text-left">网络策略</span>
+          <span class="nav-kbd">POLICY</span>
+        </button>
+        <button class="nav-item" type="button" data-section="routing">
+          <iconify-icon icon="mdi:routes" class="text-lg"></iconify-icon>
+          <span class="flex-1 text-left">路由规则</span>
+          <span class="nav-kbd">ROUTING</span>
+        </button>
+        <button class="nav-item" type="button" data-section="injection">
+          <iconify-icon icon="mdi:transit-connection-variant" class="text-lg"></iconify-icon>
+          <span class="flex-1 text-left">进程注入</span>
+          <span class="nav-kbd">INJECT</span>
+        </button>
+        <button class="nav-item" type="button" data-section="diagnostics">
+          <iconify-icon icon="mdi:console-line" class="text-lg"></iconify-icon>
+          <span class="flex-1 text-left">诊断与测试</span>
+          <span class="nav-kbd">DIAG</span>
+        </button>
+      </nav>
+
+      <div class="mt-4 border-t border-ag-border pt-4">
+        <div class="text-xs text-ag-muted">CONFIG STATUS</div>
+        <div id="configStatus" class="mt-2 text-xs">_等待导入...</div>
+        <div id="configSummary" class="mt-3 text-xs text-ag-muted"></div>
       </div>
-      <div class="card-body">
-        <div class="template-grid">
-          <button class="template-btn" type="button" data-template="clash_default" aria-label="应用模板：Clash 本地代理（7890）">
-            <span class="template-title">Clash / 通用本地代理</span>
-            <span class="template-desc">SOCKS5 代理：127.0.0.1:7890；默认走代理</span>
-          </button>
-          <button class="template-btn" type="button" data-template="https_only_proxy" aria-label="应用模板：仅代理 HTTPS（443）">
-            <span class="template-title">仅代理 HTTPS</span>
-            <span class="template-desc">仅 443 端口走代理；其它端口直连（适合轻量场景）</span>
-          </button>
-          <button class="template-btn" type="button" data-template="lan_direct_proxy_else" aria-label="应用模板：局域网直连，其它走代理">
-            <span class="template-title">局域网直连，其它走代理</span>
-            <span class="template-desc">私网/本地域名直连；剩余默认走代理</span>
-          </button>
-          <button class="template-btn" type="button" data-template="direct_all" aria-label="应用模板：全直连（调试）">
-            <span class="template-title">全直连（调试）</span>
-            <span class="template-desc">默认直连；用于排查代理链路问题</span>
-          </button>
-        </div>
-        <p class="hint">提示：模板只是“填充页面参数”。只有点击“导出配置”后才会写入文件。</p>
-        <details class="learn-more">
-          <summary>了解更多：模板背后的规则是什么？</summary>
-          <div class="learn-more-body">
-            <ul>
-              <li><strong>Clash / 通用本地代理</strong>：将上游代理设置为 <code>127.0.0.1:7890</code>（SOCKS5），默认动作 proxy。</li>
-              <li><strong>仅代理 HTTPS</strong>：添加规则：端口 <code>443</code> + 域名 <code>*</code> → proxy；默认动作 direct。</li>
-              <li><strong>局域网直连，其它走代理</strong>：启用“内置私网直连”，并增加 <code>.local/.lan</code> 直连域名规则；默认动作 proxy。</li>
-              <li><strong>全直连（调试）</strong>：关闭路由规则的复杂性，默认动作 direct。</li>
-            </ul>
-          </div>
-        </details>
-      </div>
-    </section>
-    
-    <!-- Global Settings -->
-    <div style="display: grid; gap: 24px; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));">
-      <section class="card">
+    </aside>
+
+    <!-- Right content -->
+    <div class="min-w-0">
+      <!-- OVERVIEW -->
+      <section class="card" data-section-panel="overview">
         <div class="card-header">
-          <h2>// 全局策略 (GLOBAL_POLICY)</h2>
-          <p>控制规则生效方式、默认动作与兜底行为</p>
+          <h2>// 概览（OVERVIEW）</h2>
+          <p>导入 → 编辑 → 校验 → 导出</p>
         </div>
         <div class="card-body">
-          <div class="form-grid compact">
-            <label class="field inline">
-              <input id="routingEnabled" type="checkbox" />
-              <span>启用路由引擎 <span class="help" data-tip="关闭后不再按规则匹配，直接使用默认动作（通常为 proxy）。">?</span></span>
-            </label>
-            <label class="field inline">
-              <input id="useDefaultPrivate" type="checkbox" />
-              <span>内置私网直连 <span class="help" data-tip="自动注入 RFC1918/loopback/link-local 等直连规则；无需手动写入 rules 列表。">?</span></span>
-            </label>
-            <label class="field">
-              <span>优先级模式（PRIORITY_MODE） <span class="help" data-tip="顺序模式：从上到下；数值模式：priority 越大越优先。">?</span></span>
-              <select id="priorityMode">
-                <option value="order">按列表顺序（从上到下）</option>
-                <option value="number">按 priority 数值（越大越优先）</option>
-              </select>
-              <p class="hint">推荐：新手先用“按列表顺序”。团队协作/大量规则再切到 priority 数值。</p>
-            </label>
-            <label class="field">
-              <span>默认动作（DEFAULT_ACTION） <span class="help" data-tip="当没有任何规则命中时，采用该动作作为兜底。">?</span></span>
-              <select id="defaultAction">
-                <option value="proxy">proxy（代理）</option>
-                <option value="direct">direct（直连）</option>
-              </select>
-              <p class="hint">常用：默认 proxy，给直连/特殊目标单独写规则。</p>
-            </label>
-          </div>
-          <div id="priorityWarning" class="notice warn"></div>
-          <details class="learn-more">
-            <summary>了解更多：两种优先级模式有什么区别？</summary>
-            <div class="learn-more-body">
-              <ul>
-                <li><strong>按列表顺序</strong>：规则从上到下依次匹配，先命中者生效；适合快速试错与小规模规则。</li>
-                <li><strong>按 priority 数值</strong>：priority 越大越优先，列表顺序只用于展示；适合多人维护与稳定排序。</li>
-              </ul>
+          <section id="onboardingCard" class="onboarding">
+            <div class="flex flex-col gap-3">
+              <div class="text-sm text-ag-textMain">快速入门 / QUICK_START</div>
+              <ol class="steps">
+                <li><strong>导入配置</strong>：导入你现有的 <code>config.json</code>，或点“恢复默认”生成全量示例。</li>
+                <li><strong>编辑配置</strong>：按左侧导航依次配置：代理 → 网络策略 → 路由规则 → 注入策略。</li>
+                <li><strong>命中测试</strong>：在“诊断与测试”中模拟 Connect/DNS 阶段命中结果。</li>
+                <li><strong>导出配置</strong>：导出新的 <code>config.json</code>（会保留未知字段）。</li>
+              </ol>
+              <div class="flex flex-wrap gap-2">
+                <button id="btnOnboardingHide" class="ag-btn ag-btn-ghost" type="button">知道了</button>
+                <button id="btnOnboardingNever" class="ag-btn ag-btn-danger" type="button">不再提示</button>
+              </div>
             </div>
-          </details>
+          </section>
+
+          <div class="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <section class="rounded border border-ag-border bg-ag-surface2 p-4">
+              <div class="flex items-center justify-between">
+                <div class="text-sm text-ag-secondary">// 一键配置（QUICK_PRESET）</div>
+                <div class="text-xs text-ag-muted">会覆盖：代理 / 路由</div>
+              </div>
+              <div class="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                <button class="template-btn" type="button" data-template="clash_default">
+                  <span class="template-title">Clash / 通用本地代理</span>
+                  <span class="template-desc">SOCKS5：127.0.0.1:7890；默认 proxy</span>
+                </button>
+                <button class="template-btn" type="button" data-template="https_only_proxy">
+                  <span class="template-title">仅代理 HTTPS</span>
+                  <span class="template-desc">仅 443 走代理；其它直连</span>
+                </button>
+                <button class="template-btn" type="button" data-template="lan_direct_proxy_else">
+                  <span class="template-title">局域网直连，其它走代理</span>
+                  <span class="template-desc">私网/本地域名 direct；默认 proxy</span>
+                </button>
+                <button class="template-btn" type="button" data-template="direct_all">
+                  <span class="template-title">全直连（调试）</span>
+                  <span class="template-desc">默认 direct；关闭复杂性</span>
+                </button>
+              </div>
+            </section>
+
+            <section class="rounded border border-ag-border bg-ag-surface2 p-4">
+              <div class="flex items-center justify-between">
+                <div class="text-sm text-ag-secondary">// 配置摘要（RUNTIME_BEHAVIOR）</div>
+                <div class="text-xs text-ag-muted">仅用于理解行为</div>
+              </div>
+              <div id="runtimeBehaviorHint" class="mt-3 text-xs leading-relaxed text-ag-text">
+                _等待载入配置后生成摘要...\n
+              </div>
+            </section>
+          </div>
         </div>
       </section>
 
-      <section class="card">
+      <!-- PROXY -->
+      <section class="card hidden" data-section-panel="proxy">
         <div class="card-header">
-          <h2>// 上游代理（UPSTREAM_PROXY）</h2>
-          <p>配置当前系统实际使用的代理地址（如 Clash / V2RayN）</p>
+          <h2>// 代理与日志（PROXY_LOGGING）</h2>
+          <p>proxy / log_level / traffic_logging</p>
         </div>
         <div class="card-body">
-          <div class="form-grid">
-            <label class="field">
-              <span>代理协议（type） <span class="help" data-tip="常见：SOCKS5（Clash 默认 7890）或 HTTP（部分代理软件提供）。">?</span></span>
-              <select id="proxyType">
-                <option value="socks5">SOCKS5 代理</option>
-                <option value="http">HTTP 代理</option>
-              </select>
-            </label>
-            <label class="field">
-              <span>代理地址（host） <span class="help" data-tip="一般为 127.0.0.1（本机代理）或局域网网关 IP。">?</span></span>
-              <input id="proxyHost" type="text" placeholder="127.0.0.1" />
-            </label>
-            <label class="field">
-              <span>代理端口（port） <span class="help" data-tip="常见：7890（Clash SOCKS5）、7891（Clash HTTP）。">?</span></span>
-              <input id="proxyPort" type="number" placeholder="7890" />
-            </label>
+          <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <section class="rounded border border-ag-border bg-ag-surface2 p-4">
+              <div class="text-sm text-ag-secondary">// 上游代理（proxy）</div>
+
+              <div class="mt-3 flex items-center justify-between gap-3">
+                <label class="inline-flex items-center gap-2 text-xs text-ag-text">
+                  <input id="proxyEnabled" type="checkbox" />
+                  <span>启用上游代理（proxy.port=0 表示禁用）</span>
+                </label>
+                <span id="proxyDetectBadge" class="text-[10px] text-ag-muted"></span>
+              </div>
+
+              <div class="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+                <label class="field">
+                  <span>type <span class="badge badge--opt">可选</span> <span class="help" data-tip="后端仅允许 socks5/http；会自动小写并校验。">?</span></span>
+                  <select id="proxyType">
+                    <option value="socks5">socks5</option>
+                    <option value="http">http</option>
+                  </select>
+                  <div id="err_proxyType" class="field-error"></div>
+                </label>
+                <label class="field md:col-span-2">
+                  <span>host <span class="badge badge--cond">条件必填</span> <span class="help" data-tip="代理服务器地址；为空会回退为 127.0.0.1。启用代理（port!=0）时建议明确填写。">?</span></span>
+                  <input id="proxyHost" type="text" placeholder="127.0.0.1" />
+                  <div id="err_proxyHost" class="field-error"></div>
+                </label>
+                <label class="field">
+                  <span>port <span class="badge badge--opt">可选</span> <span class="help" data-tip="0=禁用代理；有效范围 0~65535。">?</span></span>
+                  <input id="proxyPort" type="number" placeholder="7890" />
+                  <div id="err_proxyPort" class="field-error"></div>
+                </label>
+              </div>
+
+              <div class="mt-4 rounded border border-ag-border bg-ag-surface1 p-3">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="text-xs text-ag-textMain">常用代理端口检测（best-effort）</div>
+                  <button id="btnProbePorts" class="ag-btn ag-btn-ghost" type="button">
+                    <iconify-icon icon="mdi:radar" class="text-base"></iconify-icon>
+                    <span>扫描</span>
+                  </button>
+                </div>
+                <p class="mt-2 text-xs text-ag-muted">
+                  说明：浏览器无法进行原始 TCP/SOCKS5 握手探测；这里通过“HTTP 探测 + 常见端口启发式”给出候选标识，仅供辅助。
+                </p>
+                <div id="proxyProbeList" class="mt-3 space-y-2"></div>
+              </div>
+            </section>
+
+            <section class="rounded border border-ag-border bg-ag-surface2 p-4">
+              <div class="text-sm text-ag-secondary">// 日志（log_level / traffic_logging）</div>
+
+              <div class="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+                <label class="field">
+                  <span>log_level <span class="badge badge--opt">可选</span> <span class="help" data-tip="可选: debug/info/warn/error；无效会回退为 info。">?</span></span>
+                  <select id="logLevel">
+                    <option value="debug">debug</option>
+                    <option value="info">info</option>
+                    <option value="warn">warn</option>
+                    <option value="error">error</option>
+                  </select>
+                  <div id="err_logLevel" class="field-error"></div>
+                </label>
+
+                <label class="field inline">
+                  <input id="trafficLogging" type="checkbox" />
+                  <span>traffic_logging <span class="badge badge--opt">可选</span> <span class="help" data-tip="启用后会在 send/recv Hook 中输出流量摘要；可能产生额外 IO 开销。">?</span></span>
+                </label>
+              </div>
+            </section>
           </div>
-          <p class="hint">提示：这里写入 <code>config.json</code> 的 <code>proxy.host/proxy.port/proxy.type</code>。</p>
         </div>
       </section>
-    </div>
 
-    <!-- Rule Editor -->
-    <section class="card rule-section">
-      <div class="card-header">
-        <h2>// 规则管理（RULE_MANAGEMENT）</h2>
-        <p>左侧选择规则，右侧编辑详情；顺序模式下可用上/下移调整生效顺序</p>
-      </div>
-      <div class="rule-layout">
-        <!-- Sidebar -->
-        <aside class="rule-list-container">
-          <div class="rule-toolbar">
-            <button id="btnAddRule" class="ghost" type="button" title="新增规则" aria-label="新增规则">[ 新增 ]</button>
-            <button id="btnCloneRule" class="ghost" type="button" title="复制当前规则" aria-label="复制当前规则">[ 复制 ]</button>
-            <button id="btnMoveUp" class="ghost" type="button" title="上移（顺序模式）" aria-label="上移规则">[ 上移 ]</button>
-            <button id="btnMoveDown" class="ghost" type="button" title="下移（顺序模式）" aria-label="下移规则">[ 下移 ]</button>
-            <button id="btnDeleteRule" class="danger" type="button" title="删除规则（高风险）" aria-label="删除规则">[ 删除 ]</button>
+      <!-- NETWORK POLICY -->
+      <section class="card hidden" data-section-panel="network">
+        <div class="card-header">
+          <h2>// 网络策略（NETWORK_POLICY）</h2>
+          <p>fake_ip / timeout / proxy_rules*</p>
+        </div>
+        <div class="card-body">
+          <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <section class="rounded border border-ag-border bg-ag-surface2 p-4">
+              <div class="text-sm text-ag-secondary">// FakeIP（fake_ip）</div>
+              <div class="mt-3">
+                <label class="field inline">
+                  <input id="fakeIpEnabled" type="checkbox" />
+                  <span>enabled <span class="badge badge--opt">可选</span> <span class="help" data-tip="启用后会在 DNS Hook 中为域名分配虚拟 IP；并在 connect 阶段把 FakeIP 还原回域名。">?</span></span>
+                </label>
+              </div>
+              <div class="mt-4">
+                <label class="field">
+                  <span>cidr <span class="badge badge--cond">条件必填</span> <span class="help" data-tip="FakeIP 地址池 CIDR（IPv4）。默认 198.18.0.0/15；启用 FakeIP 时必须为有效 IPv4 CIDR。">?</span></span>
+                  <input id="fakeIpCidr" type="text" placeholder="198.18.0.0/15" />
+                  <div id="err_fakeIpCidr" class="field-error"></div>
+                </label>
+              </div>
+            </section>
+
+            <section class="rounded border border-ag-border bg-ag-surface2 p-4">
+              <div class="text-sm text-ag-secondary">// 超时（timeout, ms）</div>
+              <div class="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+                <label class="field">
+                  <span>connect <span class="badge badge--opt">可选</span> <span class="help" data-tip="非阻塞 connect 等待超时（>0）。">?</span></span>
+                  <input id="timeoutConnect" type="number" placeholder="5000" />
+                  <div id="err_timeoutConnect" class="field-error"></div>
+                </label>
+                <label class="field">
+                  <span>send <span class="badge badge--opt">可选</span> <span class="help" data-tip="SO_SNDTIMEO（>0）。">?</span></span>
+                  <input id="timeoutSend" type="number" placeholder="5000" />
+                  <div id="err_timeoutSend" class="field-error"></div>
+                </label>
+                <label class="field">
+                  <span>recv <span class="badge badge--opt">可选</span> <span class="help" data-tip="SO_RCVTIMEO（>0）。">?</span></span>
+                  <input id="timeoutRecv" type="number" placeholder="5000" />
+                  <div id="err_timeoutRecv" class="field-error"></div>
+                </label>
+              </div>
+            </section>
           </div>
-          <ul id="ruleList">
-            <!-- Dynamic Content -->
-          </ul>
-        </aside>
 
-        <!-- Detail Editor -->
-        <div class="rule-editor-container">
-          <div id="ruleEditorForm">
-            <div class="form-grid">
-              <label class="field" style="grid-column: span 2;">
-                <span>规则名称（name） <span class="help" data-tip="仅用于展示与日志定位；建议用可读的名字，比如 lan-direct / https-proxy。">?</span></span>
-                <input id="ruleName" type="text" placeholder="例如：lan-direct / https-proxy" />
+          <section class="mt-6 rounded border border-ag-border bg-ag-surface2 p-4">
+            <div class="text-sm text-ag-secondary">// ProxyRules（proxy_rules）</div>
+
+            <div class="mt-4 grid grid-cols-1 gap-4 md:grid-cols-4">
+              <label class="field">
+                <span>dns_mode <span class="badge badge--opt">可选</span> <span class="help" data-tip="Port 53 策略：direct/proxy。">?</span></span>
+                <select id="dnsMode">
+                  <option value="direct">direct</option>
+                  <option value="proxy">proxy</option>
+                </select>
+                <div id="err_dnsMode" class="field-error"></div>
               </label>
               <label class="field">
-                <span>动作（action） <span class="help" data-tip="命中该规则后执行的动作：proxy 走代理；direct 直连。">?</span></span>
-                <select id="ruleAction">
-                  <option value="proxy">proxy（代理）</option>
-                  <option value="direct">direct（直连）</option>
+                <span>ipv6_mode <span class="badge badge--opt">可选</span> <span class="help" data-tip="IPv6 策略：proxy/direct/block。">?</span></span>
+                <select id="ipv6Mode">
+                  <option value="proxy">proxy</option>
+                  <option value="direct">direct</option>
+                  <option value="block">block</option>
+                </select>
+                <div id="err_ipv6Mode" class="field-error"></div>
+              </label>
+              <label class="field">
+                <span>udp_mode <span class="badge badge--opt">可选</span> <span class="help" data-tip="UDP 策略：block/direct。默认 block（禁用 QUIC/HTTP3）。">?</span></span>
+                <select id="udpMode">
+                  <option value="block">block</option>
+                  <option value="direct">direct</option>
+                </select>
+                <div id="err_udpMode" class="field-error"></div>
+              </label>
+            </div>
+
+            <div class="mt-5 rounded border border-ag-border bg-ag-surface1 p-3">
+              <div class="flex items-center justify-between gap-3">
+                <div class="text-xs text-ag-textMain">
+                  allowed_ports <span class="badge badge--opt">可选</span>
+                  <span class="help" data-tip="允许走代理的目标端口白名单。为空=允许所有端口；非空时仅列表内端口可走代理。后端 Load() 后会排序去重。">?</span>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  <button id="btnAllowedPortsClear" class="ag-btn ag-btn-ghost" type="button">清空(=全部)</button>
+                  <button id="btnAllowedPortsAdd" class="ag-btn ag-btn-ghost" type="button">添加端口</button>
+                </div>
+              </div>
+              <div id="allowedPortsList" class="mt-3 space-y-2"></div>
+              <div id="err_allowedPorts" class="field-error mt-2"></div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <!-- ROUTING -->
+      <section class="card hidden" data-section-panel="routing">
+        <div class="card-header">
+          <h2>// 路由规则（ROUTING）</h2>
+          <p>proxy_rules.routing</p>
+        </div>
+        <div class="card-body">
+          <section class="rounded border border-ag-border bg-ag-surface2 p-4">
+            <div class="text-sm text-ag-secondary">// 全局策略（routing）</div>
+            <div class="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <label class="field inline">
+                <input id="routingEnabled" type="checkbox" />
+                <span>enabled <span class="badge badge--opt">可选</span> <span class="help" data-tip="关闭后不再按规则匹配，直接使用 default_action。">?</span></span>
+              </label>
+              <label class="field inline">
+                <input id="useDefaultPrivate" type="checkbox" />
+                <span>use_default_private <span class="badge badge--opt">可选</span> <span class="help" data-tip="自动注入 default-private（私网/回环/link-local）。">?</span></span>
+              </label>
+              <label class="field">
+                <span>priority_mode <span class="badge badge--opt">可选</span> <span class="help" data-tip="order：从上到下；number：priority 越大越优先（稳定排序）。">?</span></span>
+                <select id="priorityMode">
+                  <option value="order">order</option>
+                  <option value="number">number</option>
                 </select>
               </label>
               <label class="field">
-                <span>priority（数值模式） <span class="help" data-tip="仅在“按 priority 数值”模式下生效；值越大越优先。">?</span></span>
-                <input id="rulePriority" type="number" placeholder="0" />
-                <p class="hint">建议：保留空间，如 100/200/300… 方便后续插入新规则。</p>
-              </label>
-              <label class="field inline">
-                <input id="ruleEnabled" type="checkbox" />
-                <span>启用规则 <span class="help" data-tip="关闭后该规则将被跳过，不参与匹配。">?</span></span>
+                <span>default_action <span class="badge badge--opt">可选</span> <span class="help" data-tip="无规则命中时的兜底动作：proxy/direct。">?</span></span>
+                <select id="defaultAction">
+                  <option value="proxy">proxy</option>
+                  <option value="direct">direct</option>
+                </select>
               </label>
             </div>
+            <div id="priorityWarning" class="notice warn mt-4"></div>
+          </section>
 
-            <div style="margin-top: 20px; display: grid; gap: 20px; grid-template-columns: 1fr 1fr;">
-              <label class="field">
-                <span>IPv4 CIDR（每行一个） <span class="help" data-tip="示例：192.168.1.0/24；全量匹配可用 0.0.0.0/0。">?</span></span>
-                <textarea id="ruleIpv4" rows="5" placeholder="192.168.1.0/24"></textarea>
-              </label>
-              <label class="field">
-                <span>IPv6 CIDR（每行一个） <span class="help" data-tip="示例：::1/128；全量匹配可用 ::/0。">?</span></span>
-                <textarea id="ruleIpv6" rows="5" placeholder="::1/128"></textarea>
-              </label>
-            </div>
+          <section class="mt-6 rounded border border-ag-border bg-ag-surface2 p-4">
+            <div class="text-sm text-ag-secondary">// 规则管理（rules[]）</div>
 
-            <div style="margin-top: 20px; display: grid; gap: 20px; grid-template-columns: 1fr 1fr;">
-              <label class="field">
-                <span>域名匹配（domains） <span class="help" data-tip="支持 .local / *.example.com / *（全匹配）。留空表示仅按 CIDR 匹配。">?</span></span>
-                <textarea id="ruleDomains" rows="5" placeholder=".local&#10;*.example.com&#10;*"></textarea>
-                <p class="hint">提示：填 <code>*</code> 表示匹配全部域名（请谨慎使用）。</p>
-              </label>
-              <label class="field">
-                <span>端口（ports） <span class="help" data-tip="支持单端口（443）或范围（10000-20000）。留空表示“全部端口”。">?</span></span>
-                <textarea id="rulePorts" rows="5" placeholder="443&#10;10000-20000"></textarea>
-              </label>
-            </div>
+            <div class="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[320px_1fr]">
+              <!-- Rule list -->
+              <aside class="rounded border border-ag-border bg-ag-surface1">
+                <div class="flex flex-wrap gap-2 border-b border-ag-border p-3">
+                  <button id="btnAddRule" class="ag-btn ag-btn-ghost" type="button">新增</button>
+                  <button id="btnCloneRule" class="ag-btn ag-btn-ghost" type="button">复制</button>
+                  <button id="btnMoveUp" class="ag-btn ag-btn-ghost" type="button">上移</button>
+                  <button id="btnMoveDown" class="ag-btn ag-btn-ghost" type="button">下移</button>
+                  <button id="btnDeleteRule" class="ag-btn ag-btn-danger" type="button">删除</button>
+                </div>
+                <ul id="ruleList" class="max-h-[520px] overflow-auto"></ul>
+              </aside>
 
-            <div style="margin-top: 20px;">
-              <label class="field">
-                <span>协议（protocols） <span class="help" data-tip="默认 tcp。当前实现仅支持 tcp；留空等同于 tcp。">?</span></span>
-                <input id="ruleProtocols" type="text" placeholder="tcp" />
-              </label>
+              <!-- Rule editor -->
+              <div class="min-w-0 rounded border border-ag-border bg-ag-surface1 p-4">
+                <div id="ruleEditorForm" class="space-y-4">
+                  <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <label class="field md:col-span-2">
+                      <span>name <span class="badge badge--opt">可选</span> <span class="help" data-tip="仅用于展示与日志定位；建议可读：lan-direct / https-proxy。">?</span></span>
+                      <input id="ruleName" type="text" placeholder="例如：lan-direct / https-proxy" />
+                      <div id="err_ruleName" class="field-error"></div>
+                    </label>
+                    <label class="field">
+                      <span>action <span class="badge badge--opt">可选</span> <span class="help" data-tip="direct/proxy。">?</span></span>
+                      <select id="ruleAction">
+                        <option value="proxy">proxy</option>
+                        <option value="direct">direct</option>
+                      </select>
+                    </label>
+                    <label class="field">
+                      <span>priority <span class="badge badge--opt">可选</span> <span class="help" data-tip="仅在 priority_mode=number 时生效；值越大越优先。">?</span></span>
+                      <input id="rulePriority" type="number" placeholder="0" />
+                    </label>
+                    <label class="field inline">
+                      <input id="ruleEnabled" type="checkbox" />
+                      <span>enabled <span class="badge badge--opt">可选</span></span>
+                    </label>
+                    <label class="field">
+                      <span>protocols <span class="badge badge--opt">可选</span> <span class="help" data-tip="当前后端实现仅支持 tcp；留空=不限制。">?</span></span>
+                      <input id="ruleProtocols" type="text" placeholder="tcp" />
+                    </label>
+                  </div>
+
+                  <div id="ruleRiskWarning" class="notice warn hidden"></div>
+
+                  <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <div class="rounded border border-ag-border bg-ag-surface2 p-3">
+                      <div class="flex items-center justify-between">
+                        <div class="text-xs text-ag-textMain">
+                          ip_cidrs_v4 <span class="badge badge--opt">可选</span>
+                          <span class="help" data-tip="IPv4 CIDR 列表（如 10.0.0.0/8）。无效条目后端会跳过，不会生效。">?</span>
+                        </div>
+                        <button id="btnRuleAddV4" class="ag-btn ag-btn-ghost" type="button">添加</button>
+                      </div>
+                      <div id="ruleIpv4List" class="mt-3 space-y-2"></div>
+                      <details class="learn-more">
+                        <summary>批量粘贴</summary>
+                        <div class="learn-more-body">
+                          <textarea id="ruleIpv4Bulk" rows="4" placeholder="10.0.0.0/8"></textarea>
+                        </div>
+                      </details>
+                    </div>
+                    <div class="rounded border border-ag-border bg-ag-surface2 p-3">
+                      <div class="flex items-center justify-between">
+                        <div class="text-xs text-ag-textMain">
+                          ip_cidrs_v6 <span class="badge badge--opt">可选</span>
+                          <span class="help" data-tip="IPv6 CIDR 列表（如 fc00::/7）。无效条目后端会跳过，不会生效。">?</span>
+                        </div>
+                        <button id="btnRuleAddV6" class="ag-btn ag-btn-ghost" type="button">添加</button>
+                      </div>
+                      <div id="ruleIpv6List" class="mt-3 space-y-2"></div>
+                      <details class="learn-more">
+                        <summary>批量粘贴</summary>
+                        <div class="learn-more-body">
+                          <textarea id="ruleIpv6Bulk" rows="4" placeholder="fc00::/7"></textarea>
+                        </div>
+                      </details>
+                    </div>
+                    <div class="rounded border border-ag-border bg-ag-surface2 p-3">
+                      <div class="flex items-center justify-between">
+                        <div class="text-xs text-ag-textMain">
+                          domains <span class="badge badge--opt">可选</span>
+                          <span class="help" data-tip="域名匹配：支持精确（example.com）、后缀（.local）、通配符（*.example.com / *）。">?</span>
+                        </div>
+                        <button id="btnRuleAddDomain" class="ag-btn ag-btn-ghost" type="button">添加</button>
+                      </div>
+                      <div id="ruleDomainsList" class="mt-3 space-y-2"></div>
+                      <details class="learn-more">
+                        <summary>批量粘贴</summary>
+                        <div class="learn-more-body">
+                          <textarea id="ruleDomainsBulk" rows="4" placeholder=".local"></textarea>
+                        </div>
+                      </details>
+                    </div>
+                    <div class="rounded border border-ag-border bg-ag-surface2 p-3">
+                      <div class="flex items-center justify-between">
+                        <div class="text-xs text-ag-textMain">
+                          ports <span class="badge badge--opt">可选</span>
+                          <span class="help" data-tip="端口匹配：单端口（443）或区间（10000-20000）。留空=不限制。">?</span>
+                        </div>
+                        <button id="btnRuleAddPort" class="ag-btn ag-btn-ghost" type="button">添加</button>
+                      </div>
+                      <div id="rulePortsList" class="mt-3 space-y-2"></div>
+                      <details class="learn-more">
+                        <summary>批量粘贴</summary>
+                        <div class="learn-more-body">
+                          <textarea id="rulePortsBulk" rows="4" placeholder="443\n10000-20000"></textarea>
+                        </div>
+                      </details>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
-            
-            <div id="ruleRiskWarning" class="notice warn" style="display: none"></div>
-            <details class="learn-more">
-              <summary>了解更多：域名与端口的组合规则</summary>
-              <div class="learn-more-body">
-                <ul>
-                  <li><strong>域名留空</strong>：只按 CIDR 匹配。</li>
-                  <li><strong>端口留空</strong>：表示匹配全部端口。</li>
-                  <li><strong>域名填 *</strong>：匹配全部域名；建议配合端口或 CIDR 进一步收敛范围。</li>
+          </section>
+        </div>
+      </section>
+
+      <!-- INJECTION -->
+      <section class="card hidden" data-section-panel="injection">
+        <div class="card-header">
+          <h2>// 进程注入（PROCESS_INJECTION）</h2>
+          <p>child_injection*</p>
+        </div>
+        <div class="card-body">
+          <section class="rounded border border-ag-border bg-ag-surface2 p-4">
+            <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+              <div class="space-y-4">
+                <label class="field inline">
+                  <input id="childInjection" type="checkbox" />
+                  <span>child_injection <span class="badge badge--opt">可选</span> <span class="help" data-tip="是否自动注入子进程（CreateProcess Hook）。">?</span></span>
+                </label>
+
+                <label class="field">
+                  <span>child_injection_mode <span class="badge badge--opt">可选</span> <span class="help" data-tip="filtered：按 target_processes 过滤；inherit：注入所有子进程（可用 exclude 排除）。">?</span></span>
+                  <select id="childInjectionMode">
+                    <option value="filtered">filtered</option>
+                    <option value="inherit">inherit</option>
+                  </select>
+                  <div id="err_childInjectionMode" class="field-error"></div>
+                </label>
+              </div>
+
+              <div class="rounded border border-ag-border bg-ag-surface1 p-3">
+                <div class="text-xs text-ag-textMain">提示</div>
+                <ul class="mt-2 list-disc pl-5 text-xs text-ag-muted">
+                  <li>target_processes 为空表示“全部进程”。</li>
+                  <li>child_injection_exclude 支持“大小写不敏感 + 子串匹配”。</li>
                 </ul>
               </div>
-            </details>
-          </div>
-        </div>
-      </div>
-    </section>
+            </div>
 
-    <!-- Test Console -->
-    <section class="card test-console">
-      <div class="card-header">
-        <h2>// 规则命中测试（SIMULATION_CONSOLE）</h2>
-        <p>仅本地匹配模拟，不会发起真实网络请求</p>
-      </div>
-      <div class="card-body">
-        <div class="form-grid compact" style="align-items: end;">
-          <label class="field" style="flex: 2;">
-            <span>目标 Host / IP <span class="help" data-tip="可填域名（nas.local）或 IP（192.168.1.10）。">?</span></span>
-            <input id="testHost" type="text" placeholder="nas.local / 192.168.1.10" />
-          </label>
-          <label class="field">
-            <span>端口 <span class="help" data-tip="Connect 阶段会使用端口匹配；DNS 阶段会以 port=0 模拟。">?</span></span>
-            <input id="testPort" type="number" placeholder="443" />
-          </label>
-          <label class="field">
-            <span>协议</span>
-            <select id="testProto">
-              <option value="tcp">TCP</option>
-            </select>
-          </label>
-          <button id="btnTest" class="primary" style="height: 42px;">
-            <span>[ 执行测试 ]</span>
-          </button>
+            <div class="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
+              <div class="rounded border border-ag-border bg-ag-surface1 p-3">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="text-xs text-ag-textMain">
+                    target_processes <span class="badge badge--opt">可选</span>
+                    <span class="help" data-tip="目标进程列表：为空=全部进程；非空时仅匹配到的子进程会注入（filtered 模式）。大小写不敏感，支持子串匹配。">?</span>
+                  </div>
+                  <button id="btnTargetProcessesAdd" class="ag-btn ag-btn-ghost" type="button">添加</button>
+                </div>
+                <div id="targetProcessesList" class="mt-3 space-y-2"></div>
+              </div>
+              <div class="rounded border border-ag-border bg-ag-surface1 p-3">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="text-xs text-ag-textMain">
+                    child_injection_exclude <span class="badge badge--opt">可选</span>
+                    <span class="help" data-tip="排除列表：命中则不注入。大小写不敏感，支持子串匹配（例如：steam / chrome）。">?</span>
+                  </div>
+                  <button id="btnChildExcludeAdd" class="ag-btn ag-btn-ghost" type="button">添加</button>
+                </div>
+                <div id="childInjectionExcludeList" class="mt-3 space-y-2"></div>
+              </div>
+            </div>
+          </section>
         </div>
-        <p class="hint">说明：Connect 阶段使用 (host, port) 匹配；DNS 阶段以 <code>port=0</code> 模拟解析期命中。</p>
-        <details class="learn-more">
-          <summary>了解更多：为什么要区分 Connect 与 DNS 阶段？</summary>
-          <div class="learn-more-body">
-            <p>某些规则会依赖端口（如仅代理 443）。DNS 解析阶段通常没有端口信息，因此这里用 <code>port=0</code> 进行近似模拟。</p>
-            <p>启用 FakeIP 时，DNS 阶段与 connect 阶段的行为可能不同；请结合运行日志确认最终效果。</p>
-          </div>
-        </details>
-        <div id="testResult" class="test-output">_等待输入...</div>
-      </div>
-    </section>
+      </section>
+
+      <!-- DIAGNOSTICS -->
+      <section class="card hidden" data-section-panel="diagnostics">
+        <div class="card-header">
+          <h2>// 诊断与测试（DIAGNOSTICS）</h2>
+          <p>本地匹配模拟，不会发起真实网络请求</p>
+        </div>
+        <div class="card-body">
+          <section class="rounded border border-ag-border bg-ag-surface2 p-4">
+            <div class="grid grid-cols-1 gap-4 md:grid-cols-4 md:items-end">
+              <label class="field md:col-span-2">
+                <span>目标 Host / IP <span class="help" data-tip="可填域名（nas.local）或 IP（192.168.1.10）。">?</span></span>
+                <input id="testHost" type="text" placeholder="nas.local / 192.168.1.10" />
+              </label>
+              <label class="field">
+                <span>端口 <span class="help" data-tip="Connect 阶段使用此端口；DNS 阶段会使用 port=0 做近似模拟。">?</span></span>
+                <input id="testPort" type="number" placeholder="443" />
+              </label>
+              <label class="field">
+                <span>协议</span>
+                <select id="testProto">
+                  <option value="tcp">tcp</option>
+                </select>
+              </label>
+              <button id="btnTest" class="ag-btn ag-btn-primary md:col-span-4" type="button">
+                <iconify-icon icon="mdi:play" class="text-base"></iconify-icon>
+                <span>执行测试</span>
+              </button>
+            </div>
+
+            <div class="mt-4 text-xs text-ag-muted">
+              说明：Connect 阶段按 (host/ip, port, protocol) 匹配；DNS 阶段用 port=0 近似模拟。启用 FakeIP 时请结合运行日志确认最终效果。\n
+            </div>
+
+            <div id="testResult" class="test-output mt-4">_等待输入...</div>
+          </section>
+        </div>
+      </section>
+    </div>
 
   </main>
   

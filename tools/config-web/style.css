@@ -10,7 +10,7 @@
   
   --text: #a8b0b5;
   --text-main: #e0e0e0;
-  --muted: #555555;
+  --muted: #7a7a7a; /* 提升小字号对比度（更接近 WCAG AA） */
   
   /* Neon Accents */
   --primary: #00ff41;       /* Matrix Green */
@@ -141,12 +141,13 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* Buttons (Glitch Effect) */
-button, .file-button {
+.ag-btn {
   appearance: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 8px 20px;
+  gap: 8px;
+  padding: 8px 14px;
   font-size: 13px;
   font-family: var(--font-mono);
   text-transform: uppercase;
@@ -162,18 +163,7 @@ button, .file-button {
   border-radius: var(--radius-sm);
 }
 
-/* File input wrapper: keep native input invisible but clickable */
-.file-button {
-  position: relative;
-}
-.file-button input[type="file"] {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  cursor: pointer;
-}
-
-button::before, .file-button::before {
+.ag-btn::before {
   content: '';
   position: absolute;
   top: 0;
@@ -184,38 +174,82 @@ button::before, .file-button::before {
   transition: 0.5s;
 }
 
-button:hover::before, .file-button:hover::before {
+.ag-btn:hover::before {
   left: 100%;
 }
 
-button:hover, .file-button:hover {
+.ag-btn:hover {
   border-color: var(--primary);
   box-shadow: 0 0 8px var(--primary-glow), inset 0 0 10px var(--primary-dim);
   text-shadow: 0 0 5px var(--primary);
   color: #fff;
 }
 
-button.primary {
+.ag-btn-primary {
   background: var(--primary-dim);
   border-color: var(--primary);
   color: var(--primary);
 }
 
-button.primary:hover {
+.ag-btn-primary:hover {
   background: var(--primary);
   color: #000;
   box-shadow: 0 0 15px var(--primary);
 }
 
-button.danger {
+.ag-btn-danger {
   color: var(--danger);
   border-color: var(--danger);
 }
 
-button.danger:hover {
+.ag-btn-danger:hover {
   background: var(--danger);
   color: #000;
   box-shadow: 0 0 15px var(--danger);
+}
+
+.ag-btn-ghost {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--primary);
+}
+
+/* Sidebar nav item */
+.nav-item {
+  appearance: none;
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 10px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--text-main);
+  cursor: pointer;
+  transition: 0.2s ease;
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
+.nav-item:hover {
+  border-color: rgba(0, 217, 255, 0.55);
+  box-shadow: 0 0 14px rgba(0, 217, 255, 0.10), inset 0 0 12px rgba(0, 217, 255, 0.06);
+}
+
+.nav-item.active {
+  border-color: var(--primary);
+  box-shadow: 0 0 10px rgba(0, 255, 65, 0.18), inset 0 0 12px rgba(0, 255, 65, 0.08);
+  color: var(--primary);
+}
+
+.nav-kbd {
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 0.12em;
+}
+
+.nav-item.active .nav-kbd {
+  color: rgba(0, 255, 65, 0.85);
 }
 
 /* Cards (Cyber Panels) */
@@ -290,6 +324,14 @@ button.danger:hover {
   line-height: 1.6;
 }
 
+/* Inline field validation feedback */
+.field-error {
+  margin-top: 6px;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 /* Help icon + tooltip (pure CSS) */
 .help {
   display: inline-flex;
@@ -351,6 +393,35 @@ button.danger:hover {
 .help:hover::after,
 .help:hover::before {
   opacity: 1;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  margin-left: 8px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.2;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-radius: 2px;
+}
+
+.badge--req {
+  border-color: rgba(0, 217, 255, 0.55);
+  color: var(--secondary);
+}
+
+.badge--opt {
+  border-color: rgba(255, 255, 255, 0.10);
+  color: var(--muted);
+}
+
+.badge--cond {
+  border-color: rgba(252, 238, 10, 0.55);
+  color: var(--warning);
 }
 
 input[type="text"],
@@ -447,9 +518,23 @@ input[type="checkbox"]:checked::after {
   color: var(--muted);
 }
 
+.rule-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rule-item-badge--proxy {
+  border-color: rgba(0, 217, 255, 0.65);
+  color: var(--secondary);
+}
+
+.rule-item-badge--direct {
+  border-color: rgba(0, 255, 65, 0.65);
+  color: var(--success);
+}
+
 .rule-item.active .rule-item-badge {
-  border-color: var(--primary);
-  color: var(--primary);
   box-shadow: 0 0 5px var(--primary-glow);
 }
 
@@ -520,12 +605,32 @@ input[type="checkbox"]:checked::after {
 .toast.error {
   border-color: var(--danger);
   color: var(--danger);
+  border-left-color: var(--danger);
   box-shadow: 0 0 10px rgba(255, 42, 42, 0.2);
 }
 
 .toast.warning {
   border-color: var(--warning);
   color: var(--warning);
+  border-left-color: var(--warning);
+}
+
+.toast.info {
+  border-color: rgba(0, 217, 255, 0.6);
+  color: var(--secondary);
+  border-left-color: var(--secondary);
+  box-shadow: 0 0 10px rgba(0, 217, 255, 0.12);
+}
+
+.toast.success {
+  border-color: rgba(0, 255, 65, 0.6);
+  color: var(--success);
+  border-left-color: var(--success);
+  box-shadow: 0 0 10px rgba(0, 255, 65, 0.18);
+}
+
+.toast-fadeout {
+  animation: fadeOut 0.6s ease-out forwards;
 }
 
 @keyframes toastIn {
@@ -622,14 +727,21 @@ input[type="checkbox"]:checked::after {
 }
 
 .template-btn {
+  appearance: none;
+  display: inline-flex;
+  flex-direction: column;
   white-space: normal;
   text-align: left;
   justify-content: flex-start;
   align-items: flex-start;
   gap: 6px;
   padding: 12px 14px;
-  border-color: rgba(0, 217, 255, 0.2);
+  border: 1px solid rgba(0, 217, 255, 0.2);
+  background: rgba(0, 0, 0, 0.35);
   color: var(--text-main);
+  cursor: pointer;
+  transition: 0.2s ease;
+  font-family: var(--font-mono);
 }
 
 .template-btn:hover {
