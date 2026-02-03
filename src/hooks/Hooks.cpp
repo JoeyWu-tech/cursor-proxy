@@ -222,9 +222,10 @@ static bool IsStreamSocket(SOCKET s) {
 static bool TryGetSocketCatalogEntryId(SOCKET s, DWORD* outCatalogEntryId) {
     if (!outCatalogEntryId) return false;
     *outCatalogEntryId = 0;
-    WSAPROTOCOL_INFOA info{};
+    // 说明：WSAPROTOCOL_INFOA 的 dwCatalogEntryId 在新 SDK 下会触发弃用告警，改用 W 版本避免 C4996
+    WSAPROTOCOL_INFOW info{};
     int optLen = sizeof(info);
-    if (getsockopt(s, SOL_SOCKET, SO_PROTOCOL_INFOA, (char*)&info, &optLen) != 0) {
+    if (getsockopt(s, SOL_SOCKET, SO_PROTOCOL_INFOW, (char*)&info, &optLen) != 0) {
         return false;
     }
     *outCatalogEntryId = info.dwCatalogEntryId;

@@ -695,7 +695,6 @@ Routing rules live under `proxy_rules.routing`. They support CIDR, wildcard doma
           "ip_cidrs_v4": ["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"],
           "ip_cidrs_v6": ["fc00::/7","fe80::/10","::1/128"],
           "domains": [".local","*.corp.example.com"],
-          "ports": ["445","3389","10000-20000"],
           "protocols": ["tcp"]
         }
       ]
@@ -713,6 +712,13 @@ Routing rules live under `proxy_rules.routing`. They support CIDR, wildcard doma
 - Use `0.0.0.0/0` and `::/0` for full match.
 - The tool supports editing `proxy.host` / `proxy.port` / `proxy.type`.
 
+### Known Issues
+
+- **Historical (fixed): FakeIP + `direct + domains + ports`**: In some older versions, if FakeIP is enabled and a `direct` rule contains both `domains` and `ports`, the DNS stage may allocate a FakeIP and the connect stage may try to connect to the FakeIP directly, causing failures. If you are on an older build, please upgrade. Temporary workaround: remove the `ports` condition from that rule, or disable FakeIP.
+
+### IPv6 Notes
+
+**Priority note**: for **pure IPv6** targets (non v4-mapped), `proxy_rules.ipv6_mode` takes effect **before** `routing`. Only when `ipv6_mode=proxy` will the connection continue into routing matching.
 
 ### Verification
 
