@@ -225,6 +225,10 @@ jobs:
           body_raw="${rest#*$'\n'}"
         
           sha="$(trim "$sha")"
+          sha_suffix=""
+          if [ -n "$sha" ]; then
+            sha_suffix=" (\`${sha}\`)"
+          fi
           subject_raw="$(trim "$subject_raw")"
           body_raw="${body_raw//$'\r'/}"
         
@@ -270,9 +274,9 @@ jobs:
             desc_safe="$(md_escape_backticks "$DESC")"
         
             if [ -n "$SCOPE" ] && [ "$SCOPE" != "$TYPE" ]; then
-              ENTRY="- **${scope_safe}**: ${desc_safe} (\`${sha}\`)"
+              ENTRY="- **${scope_safe}**: ${desc_safe}${sha_suffix}"
             else
-              ENTRY="- ${desc_safe} (\`${sha}\`)"
+              ENTRY="- ${desc_safe}${sha_suffix}"
             fi
         
             body_out="$(format_body_as_sublist "$body" || true)"
@@ -299,7 +303,7 @@ jobs:
             subject_other="$(md_escape_backticks "$subject_other")"
             [ -z "$subject_other" ] && subject_other="(no subject)"
         
-            ENTRY="- ${subject_other} (\`${sha}\`)"
+            ENTRY="- ${subject_other}${sha_suffix}"
             body_out="$(format_body_as_sublist "$body_raw" || true)"
             if [ -n "${body_out:-}" ]; then
               ENTRY+=$'\n'"$body_out"
