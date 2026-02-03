@@ -251,8 +251,8 @@ $configJson = @{
         "config" = $Config
         "arch" = $Arch
     }
-    # 日志等级：默认 debug（排障更直观）；日常使用可改为 info 以减少刷屏/IO 开销
-    log_level = "debug"
+    # 日志等级：默认 info（克制日志输出）；排障时可改为 debug 以获得更详细信息
+    log_level = "info"
     proxy = @{
         host = "127.0.0.1"
         port = 7890
@@ -269,17 +269,28 @@ $configJson = @{
     }
     traffic_logging = $false
     child_injection = $true
-    target_processes = @(
-        "language_server_windows",
-        "Antigravity.exe"
-    )
+    # 子进程注入模式: filtered(按target_processes过滤) / inherit(注入所有子进程)
+    child_injection_mode = "filtered"
+    # 子进程注入排除列表（大小写不敏感，支持子串匹配）
+    child_injection_exclude = @()
+    # 目标进程列表（空数组=注入所有子进程）
+    target_processes = @()
     proxy_rules = @{
-        allowed_ports = @()
+        # 端口白名单: 仅代理 HTTP(80) 和 HTTPS(443)，空数组=代理所有端口
+        allowed_ports = @(80, 443)
         dns_mode = "direct"
         ipv6_mode = "proxy"
         udp_mode = "block"
+        # 高级路由规则（内网自动直连，无需手动配置）
+        routing = @{
+            enabled = $true
+            priority_mode = "order"
+            default_action = "proxy"
+            use_default_private = $true
+            rules = @()
+        }
     }
-} | ConvertTo-Json -Depth 4
+} | ConvertTo-Json -Depth 5
 
 $configPath = Join-Path $OutputDir "config.json"
 $configJson | Out-File -FilePath $configPath -Encoding UTF8
@@ -314,10 +325,10 @@ Antigravity-Proxy 是一个基于 MinHook 的 Windows DLL 代理注入工具。
         "port": 7890,              // 代理服务器端口
         "type": "socks5"           // 代理类型: socks5 或 http
     },
-    "log_level": "debug",          // 日志等级: debug/info/warn/error (默认 debug)
+    "log_level": "info",           // 日志等级: debug/info/warn/error (默认 info)
     "fake_ip": {
         "enabled": true,           // 是否启用 FakeIP 系统 (拦截 DNS 解析)
-        "cidr": "198.18.0.0/15"       // FakeIP 分配的虚拟 IP 地址范围 (默认为基准测试保留网段)
+        "cidr": "198.18.0.0/15"    // FakeIP 分配的虚拟 IP 地址范围 (默认为基准测试保留网段)
     },
     "timeout": {
         "connect": 5000,           // 连接超时 (毫秒)
@@ -326,15 +337,21 @@ Antigravity-Proxy 是一个基于 MinHook 的 Windows DLL 代理注入工具。
     },
     "traffic_logging": false,      // 是否记录流量日志 (调试用)
     "child_injection": true,       // 是否自动注入子进程
-    "target_processes": [          // 目标进程列表 (空数组=注入所有子进程)
-        "language_server_windows",
-        "Antigravity.exe"
-    ],
+    "child_injection_mode": "filtered",  // 子进程注入模式: filtered(按target_processes过滤) / inherit(注入所有)
+    "child_injection_exclude": [],       // 子进程注入排除列表 (大小写不敏感，支持子串匹配)
+    "target_processes": [],        // 目标进程列表 (空数组=注入所有子进程)
     "proxy_rules": {
-        "allowed_ports": [],         // 端口白名单 (空=全部)
-        "dns_mode": "direct",       // DNS策略: direct(直连) 或 proxy(走代理)
-        "ipv6_mode": "proxy",       // IPv6策略: proxy(走代理) / direct(直连) / block(阻止)
-        "udp_mode": "block"         // UDP策略: block(默认, 阻断UDP以强制回退TCP) / direct(直连)
+        "allowed_ports": [80, 443],  // 端口白名单: 仅代理 HTTP/HTTPS，空数组=代理所有端口
+        "dns_mode": "direct",        // DNS策略: direct(直连) 或 proxy(走代理)
+        "ipv6_mode": "proxy",        // IPv6策略: proxy(走代理) / direct(直连) / block(阻止)
+        "udp_mode": "block",         // UDP策略: block(阻断UDP以强制回退TCP) / direct(直连)
+        "routing": {                 // 高级路由规则 (内网自动直连，一般无需配置)
+            "enabled": true,
+            "priority_mode": "order",
+            "default_action": "proxy",
+            "use_default_private": true,
+            "rules": []
+        }
     }
 }
 ``````
@@ -366,7 +383,7 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| log_level | 日志等级 (debug/info/warn/error) | debug |
+| log_level | 日志等级 (debug/info/warn/error) | info |
 | proxy.host | 代理服务器地址 | 127.0.0.1 |
 | proxy.port | 代理服务器端口 | 7890 |
 | proxy.type | 代理类型 (socks5/http) | socks5 |
@@ -377,11 +394,18 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
 | timeout.recv | 接收超时 (毫秒) | 5000 |
 | traffic_logging | 是否记录流量日志 | false |
 | child_injection | 是否注入子进程 | true |
+| child_injection_mode | 子进程注入模式 (filtered/inherit) | filtered |
+| child_injection_exclude | 子进程注入排除列表 | [] |
 | target_processes | 目标进程列表 (空=全部) | [] |
-| proxy_rules.allowed_ports | 端口白名单 (空=全部) | [] |
+| proxy_rules.allowed_ports | 端口白名单 (空=全部代理) | [80, 443] |
 | proxy_rules.dns_mode | DNS策略 (direct/proxy) | direct |
 | proxy_rules.ipv6_mode | IPv6策略 (proxy/direct/block) | proxy |
 | proxy_rules.udp_mode | UDP策略 (block/direct) | block |
+| proxy_rules.routing.enabled | 是否启用路由分流 | true |
+| proxy_rules.routing.priority_mode | 规则优先级模式 (order/number) | order |
+| proxy_rules.routing.default_action | 默认动作 (proxy/direct) | proxy |
+| proxy_rules.routing.use_default_private | 是否自动添加内网直连规则 | true |
+| proxy_rules.routing.rules | 自定义路由规则列表 | [] |
 
 ## v1.1.0 更新说明
 
@@ -398,13 +422,13 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
 ### 配置示例
 ```json
 {
-    "target_processes": [
-        "language_server_windows",
-        "Antigravity.exe"
-    ]
+    "target_processes": ["language_server_windows", "Antigravity.exe"],
+    "child_injection_mode": "filtered",
+    "child_injection_exclude": ["unwanted_process.exe"]
 }
 ```
-如果 `target_processes` 为空数组或不存在，则注入所有子进程(原行为)。
+- `target_processes` 为空数组或不存在时，注入所有子进程(原行为)
+- `child_injection_mode="inherit"` 时注入所有子进程，可用 `child_injection_exclude` 排除特定进程
 
 ## 日志文件
 DLL 运行时会在当前目录生成 `proxy.log` 日志文件，用于调试。
