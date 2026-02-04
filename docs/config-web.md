@@ -43,7 +43,8 @@
     - `allowed_ports`：端口白名单数组（空数组=全部端口）
     - `dns_mode`：`direct/proxy`
     - `ipv6_mode`：`proxy/direct/block`
-    - `udp_mode`：`block/direct`
+    - `udp_mode`：`block/direct/proxy`
+    - `udp_fallback`：`block/direct`（仅 `udp_mode=proxy` 时生效）
     - `routing`：
       - `enabled`
       - `priority_mode`：`order/number`
@@ -81,7 +82,7 @@
 - **CIDR**：
   - `fake_ip.cidr`：要求 IPv4 CIDR
   - `RoutingRule.ip_cidrs_v4/ip_cidrs_v6`：分别校验 v4/v6 CIDR
-- **枚举值**：`log_level`、`proxy.type`、`child_injection_mode`、`dns_mode/ipv6_mode/udp_mode`、`priority_mode/default_action` 等
+- **枚举值**：`log_level`、`proxy.type`、`child_injection_mode`、`dns_mode/ipv6_mode/udp_mode/udp_fallback`、`priority_mode/default_action` 等
 
 ## 构建/发布集成说明
 

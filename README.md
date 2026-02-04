@@ -697,6 +697,7 @@ target_link_libraries(version PRIVATE ws2_32)
 | `proxy_rules.dns_mode` | string | `"direct"` | DNS策略: `direct`(直连) / `proxy`(走代理) |
 | `proxy_rules.ipv6_mode` | string | `"proxy"` | IPv6策略: `proxy`(走代理) / `direct`(直连) / `block`(阻止) |
 | `proxy_rules.udp_mode` | string | `"block"` | UDP策略: `block`(阻断) / `direct`(直连) / `proxy`(走代理, 需 SOCKS5 UDP Associate) |
+| `proxy_rules.udp_fallback` | string | `"block"` | UDP 代理失败降级策略（仅 `udp_mode=proxy` 生效）: `block`(失败即阻断, 默认) / `direct`(失败回退直连, 有泄漏风险) |
 | `proxy_rules.routing.enabled` | bool | `true` | 是否启用规则路由 |
 | `proxy_rules.routing.priority_mode` | string | `"order"` | 规则优先级: `order`(按顺序) / `number`(priority) |
 | `proxy_rules.routing.default_action` | string | `"proxy"` | 未命中时默认动作 |
@@ -730,7 +731,7 @@ target_link_libraries(version PRIVATE ws2_32)
 }
 ```
 
-**可视化配置工具**：`tools/config-web/index.html`（本地打开即可使用，支持导入/编辑/导出 `config.json`）。
+**可视化配置工具**：`resources/config-web/index.html`（本地打开即可使用；或构建后使用 `output/config-web.html`，支持导入/编辑/导出 `config.json`）。
 
 **说明**：`AUTHORS.txt` 为内嵌的 MinHook 依赖作者名单，并非本项目维护者列表。
 
@@ -762,6 +763,7 @@ target_link_libraries(version PRIVATE ws2_32)
 - 将 `proxy_rules.udp_mode` 设为 `proxy`
 - 将 `proxy.type` 设为 `socks5`（⚠️ HTTP 代理没有标准 UDP 转发能力）
 - 确保代理软件**支持 SOCKS5 UDP Associate** 并允许 UDP 转发（不同客户端/内核能力不同）
+- 可选：当代理不支持 UDP 时，可将 `proxy_rules.udp_fallback` 设为 `direct`（⚠️ 可能导致 UDP 直连泄漏；默认 `block` 更安全）
 
 示例：
 
@@ -779,6 +781,7 @@ target_link_libraries(version PRIVATE ws2_32)
 说明：
 - `dns_mode="direct"` 仍会放行 UDP/53（避免 DNS 超时）；若你希望 DNS 也走代理，请改为 `dns_mode="proxy"`。
 - 若日志出现“UDP 代理仅支持 SOCKS5 (UDP Associate)”：说明你配置了 `udp_mode=proxy` 但 `proxy.type` 不是 `socks5`，请修正配置。
+- `udp_mode="block"` 默认会阻断大部分 UDP，但仍放行 loopback 与 UDP/53 作为例外（避免影响本机通信与 DNS）。
 
 ### 验证是否生效 / Verification
 
