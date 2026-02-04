@@ -732,9 +732,27 @@ namespace Core {
                 }
 
                 // 配置校验：统一 proxy.type 大小写，并对关键字段做防御性修正，避免运行期异常
+                // 设计意图：容错处理常见的无意空格/大小写问题，减少“配置写对了但实际没生效”的排障成本。
+                auto trimInPlace = [](std::string& s) {
+                    auto isWs = [](unsigned char c) { return std::isspace(c) != 0; };
+                    size_t begin = 0;
+                    while (begin < s.size() && isWs((unsigned char)s[begin])) begin++;
+                    size_t end = s.size();
+                    while (end > begin && isWs((unsigned char)s[end - 1])) end--;
+                    if (begin == 0 && end == s.size()) return;
+                    s = s.substr(begin, end - begin);
+                };
+                trimInPlace(proxy.type);
                 std::transform(proxy.type.begin(), proxy.type.end(), proxy.type.begin(),
                                [](unsigned char c) { return (char)std::tolower(c); });
                 if (proxy.type.empty()) proxy.type = "socks5";
+
+                // 兼容用户常见写法：不少人会把 “HTTP 代理(用于 HTTPS 网站的 CONNECT)” 误写成 https。
+                // 注意：这里的 https 仅按 HTTP CONNECT 处理，不代表支持“与代理之间使用 TLS 的 HTTPS 代理”。
+                if (proxy.type == "https") {
+                    Logger::Warn("配置: proxy.type=https 暂不支持 TLS 代理；若你指的是 HTTP 代理(含 CONNECT) 访问 HTTPS 站点，请改为 http。当前已按 http 处理。");
+                    proxy.type = "http";
+                }
                 if (proxy.type != "socks5" && proxy.type != "http") {
                     Logger::Warn("配置: proxy.type 无效(" + proxy.type + ")，已回退为 socks5 (可选: socks5/http)");
                     proxy.type = "socks5";

@@ -661,7 +661,7 @@ Launch the target application, done! 🎉
 |--------|------|---------|-------------|
 | `proxy.host` | string | `"127.0.0.1"` | Proxy server address |
 | `proxy.port` | int | `7890` | Proxy server port |
-| `proxy.type` | string | `"socks5"` | Proxy type: `socks5` or `http` |
+| `proxy.type` | string | `"socks5"` | Proxy type: `socks5` or `http` (`https` is accepted and treated as `http`) |
 | `fake_ip.enabled` | bool | `true` | Enable FakeIP system |
 | `fake_ip.cidr` | string | `"198.18.0.0/15"` | FakeIP address range (benchmarking reserved) |
 | `timeout.connect` | int | `5000` | Connection timeout (ms) |

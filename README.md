@@ -684,7 +684,7 @@ target_link_libraries(version PRIVATE ws2_32)
 |--------|------|--------|------|
 | `proxy.host` | string | `"127.0.0.1"` | 代理服务器地址 |
 | `proxy.port` | int | `7890` | 代理服务器端口 |
-| `proxy.type` | string | `"socks5"` | 代理类型: `socks5` 或 `http` |
+| `proxy.type` | string | `"socks5"` | 代理类型: `socks5` 或 `http`（兼容 `https`，按 `http` 处理） |
 | `fake_ip.enabled` | bool | `true` | 是否启用 FakeIP 系统 |
 | `fake_ip.cidr` | string | `"198.18.0.0/15"` | FakeIP 地址范围 (基准测试保留网段) |
 | `timeout.connect` | int | `5000` | 连接超时 (毫秒) |
