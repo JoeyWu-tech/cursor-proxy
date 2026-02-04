@@ -280,6 +280,7 @@ $configJson = @{
         allowed_ports = @(80, 443)
         dns_mode = "direct"
         ipv6_mode = "proxy"
+        # UDP策略: block(阻断UDP以强制回退TCP) / direct(直连) / proxy(UDP走代理, 需 SOCKS5 UDP Associate)
         udp_mode = "block"
         # 高级路由规则（内网自动直连，无需手动配置）
         routing = @{
@@ -344,7 +345,7 @@ Antigravity-Proxy 是一个基于 MinHook 的 Windows DLL 代理注入工具。
         "allowed_ports": [80, 443],  // 端口白名单: 仅代理 HTTP/HTTPS，空数组=代理所有端口
         "dns_mode": "direct",        // DNS策略: direct(直连) 或 proxy(走代理)
         "ipv6_mode": "proxy",        // IPv6策略: proxy(走代理) / direct(直连) / block(阻止)
-        "udp_mode": "block",         // UDP策略: block(阻断UDP以强制回退TCP) / direct(直连)
+        "udp_mode": "block",         // UDP策略: block(阻断UDP以强制回退TCP) / direct(直连) / proxy(UDP走代理, 需 SOCKS5 UDP Associate)
         "routing": {                 // 高级路由规则 (内网自动直连，一般无需配置)
             "enabled": true,
             "priority_mode": "order",
@@ -400,7 +401,7 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
 | proxy_rules.allowed_ports | 端口白名单 (空=全部代理) | [80, 443] |
 | proxy_rules.dns_mode | DNS策略 (direct/proxy) | direct |
 | proxy_rules.ipv6_mode | IPv6策略 (proxy/direct/block) | proxy |
-| proxy_rules.udp_mode | UDP策略 (block/direct) | block |
+| proxy_rules.udp_mode | UDP策略 (block/direct/proxy) | block |
 | proxy_rules.routing.enabled | 是否启用路由分流 | true |
 | proxy_rules.routing.priority_mode | 规则优先级模式 (order/number) | order |
 | proxy_rules.routing.default_action | 默认动作 (proxy/direct) | proxy |
@@ -417,7 +418,7 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 7890
    - `allowed_ports`: 仅指定端口走代理，其他直连
    - `dns_mode`: DNS (53端口) 可选直连或走代理
    - `ipv6_mode`: IPv6 可选走代理/直连/阻止
-   - `udp_mode`: UDP 可选直连或阻断（默认阻断以强制回退 TCP，避免 QUIC/HTTP3 绕过代理）
+   - `udp_mode`: UDP 可选直连/阻断/走代理（默认阻断以强制回退 TCP；若需要 QUIC/HTTP3，请使用 proxy 并确保代理端支持 SOCKS5 UDP Associate）
 
 ### 配置示例
 ```json

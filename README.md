@@ -254,7 +254,7 @@ cd "$env:TEMP\antigravity-proxy-logs"
 | `所有 API Hook 安装成功` | Hook 生效 | ✅ 正常 |
 | `ConnectEx Hook 已安装` | 异步连接 Hook 成功 | ✅ 正常 |
 | `SOCKS5: 隧道建立成功` | 代理连接成功 | ✅ 正常 |
-| `非 SOCK_STREAM socket 直连, soType=2` | UDP 流量被跳过（正常） | ⚠️ 预期行为 |
+| `非 SOCK_STREAM socket 直连, soType=2` | UDP 未走代理（`udp_mode=direct` 或未启用 UDP 代理） | ⚠️ 视配置而定 |
 | `SOCKS5 握手失败` | 代理握手失败 | ❌ 需排查 |
 | `连接代理服务器失败` | 无法连接到代理 | ❌ 需排查 |
 | `WSA错误码=10061` | 连接被拒绝（代理未启动） | ❌ 需排查 |
@@ -386,7 +386,7 @@ Get-NetAdapterBinding -ComponentID ms_tcpip6
 
 | 问题 | 原因 | 解决方案 |
 |------|------|----------|
-| **大量 `非 SOCK_STREAM socket 直连, soType=2`** | UDP/QUIC 流量被跳过（正常） | 无需处理，SOCKS5 仅代理 TCP |
+| **大量 `非 SOCK_STREAM socket 直连, soType=2`** | UDP/QUIC 流量未走代理（`udp_mode=direct` 或 UDP 代理未生效） | 若需要 QUIC/HTTP3：设置 `udp_mode=proxy` + `proxy.type=socks5`，并确保代理端支持 SOCKS5 UDP Associate |
 | **日志显示成功但网页打不开** | Clash 规则、节点问题 | 检查 Clash 日志 |
 | **某些请求绕过代理** | 应用使用了未 Hook 的 API | 提交 Issue 反馈 |
 | **360 等安全软件环境下失效** | LSP 注入干扰 | 添加白名单或卸载 |
@@ -696,6 +696,7 @@ target_link_libraries(version PRIVATE ws2_32)
 | `proxy_rules.allowed_ports` | array | `[80, 443]` | 端口白名单 (空=全部) |
 | `proxy_rules.dns_mode` | string | `"direct"` | DNS策略: `direct`(直连) / `proxy`(走代理) |
 | `proxy_rules.ipv6_mode` | string | `"proxy"` | IPv6策略: `proxy`(走代理) / `direct`(直连) / `block`(阻止) |
+| `proxy_rules.udp_mode` | string | `"block"` | UDP策略: `block`(阻断) / `direct`(直连) / `proxy`(走代理, 需 SOCKS5 UDP Associate) |
 | `proxy_rules.routing.enabled` | bool | `true` | 是否启用规则路由 |
 | `proxy_rules.routing.priority_mode` | string | `"order"` | 规则优先级: `order`(按顺序) / `number`(priority) |
 | `proxy_rules.routing.default_action` | string | `"proxy"` | 未命中时默认动作 |
@@ -752,6 +753,32 @@ target_link_libraries(version PRIVATE ws2_32)
 - **继续代理 IPv6**：让代理监听 `::1` 或开启双栈，再把 `proxy.host` 改为 `::1`（确保代理实际监听）。
 
 **优先级说明**：当目标为纯 IPv6（非 v4-mapped）且 `proxy_rules.ipv6_mode` 为 `direct`/`block` 时，会在进入 `routing` 规则前直接直连/阻止；当 `ipv6_mode=proxy` 时才会继续进入 `routing` 匹配。
+
+### UDP/QUIC 注意事项
+
+当目标程序使用 **QUIC/HTTP3**（UDP/443）时，必须开启 UDP 代理，否则会出现“TCP 走代理但 QUIC 直连/被阻断”的现象。
+
+启用方式：
+- 将 `proxy_rules.udp_mode` 设为 `proxy`
+- 将 `proxy.type` 设为 `socks5`（⚠️ HTTP 代理没有标准 UDP 转发能力）
+- 确保代理软件**支持 SOCKS5 UDP Associate** 并允许 UDP 转发（不同客户端/内核能力不同）
+
+示例：
+
+```json
+{
+  "proxy": { "host": "127.0.0.1", "port": 10808, "type": "socks5" },
+  "proxy_rules": {
+    "udp_mode": "proxy",
+    "dns_mode": "direct",
+    "allowed_ports": [80, 443]
+  }
+}
+```
+
+说明：
+- `dns_mode="direct"` 仍会放行 UDP/53（避免 DNS 超时）；若你希望 DNS 也走代理，请改为 `dns_mode="proxy"`。
+- 若日志出现“UDP 代理仅支持 SOCKS5 (UDP Associate)”：说明你配置了 `udp_mode=proxy` 但 `proxy.type` 不是 `socks5`，请修正配置。
 
 ### 验证是否生效 / Verification
 

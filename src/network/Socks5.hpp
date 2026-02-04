@@ -16,6 +16,7 @@ namespace Network {
         constexpr uint8_t VERSION = 0x05;
         constexpr uint8_t AUTH_NONE = 0x00;
         constexpr uint8_t CMD_CONNECT = 0x01;
+        constexpr uint8_t CMD_UDP_ASSOCIATE = 0x03;
         constexpr uint8_t ATYP_IPV4 = 0x01;
         constexpr uint8_t ATYP_DOMAIN = 0x03;
         constexpr uint8_t ATYP_IPV6 = 0x04;

@@ -14,11 +14,13 @@
 #include <unordered_map>
 #include <mutex>
 #include <atomic>
+#include <memory>
 #include "../core/Config.hpp"
 #include "../core/Logger.hpp"
 #include "../network/SocketWrapper.hpp"
 #include "../network/FakeIP.hpp"
 #include "../network/Socks5.hpp"
+#include "../network/Socks5Udp.hpp"
 #include "../network/HttpConnect.hpp"
 #include "../network/SocketIo.hpp"
 #include "../network/TrafficMonitor.hpp"
@@ -33,11 +35,13 @@ typedef int (WSAAPI *getaddrinfoW_t)(PCWSTR, PCWSTR, const ADDRINFOW*, PADDRINFO
 typedef int (WSAAPI *send_t)(SOCKET, const char*, int, int);
 typedef int (WSAAPI *recv_t)(SOCKET, char*, int, int);
 typedef int (WSAAPI *sendto_t)(SOCKET, const char*, int, int, const struct sockaddr*, int);
+typedef int (WSAAPI *recvfrom_t)(SOCKET, char*, int, int, struct sockaddr*, int*);
 typedef int (WSAAPI *closesocket_t)(SOCKET);
 typedef int (WSAAPI *shutdown_t)(SOCKET, int);
 typedef int (WSAAPI *WSASend_t)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 typedef int (WSAAPI *WSARecv_t)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 typedef int (WSAAPI *WSASendTo_t)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, const struct sockaddr*, int, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+typedef int (WSAAPI *WSARecvFrom_t)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, struct sockaddr*, LPINT, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 typedef BOOL (WSAAPI *WSAConnectByNameA_t)(SOCKET, LPCSTR, LPCSTR, LPDWORD, LPSOCKADDR, LPDWORD, LPSOCKADDR, const struct timeval*, LPWSAOVERLAPPED);
 typedef BOOL (WSAAPI *WSAConnectByNameW_t)(SOCKET, LPWSTR, LPWSTR, LPDWORD, LPSOCKADDR, LPDWORD, LPSOCKADDR, const struct timeval*, LPWSAOVERLAPPED);
 typedef int (WSAAPI *WSAIoctl_t)(SOCKET, DWORD, LPVOID, DWORD, LPVOID, DWORD, LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
@@ -64,11 +68,13 @@ getaddrinfoW_t fpGetAddrInfoW = NULL;
 send_t fpSend = NULL;
 recv_t fpRecv = NULL;
 sendto_t fpSendTo = NULL;
+recvfrom_t fpRecvFrom = NULL;
 closesocket_t fpCloseSocket = NULL;
 shutdown_t fpShutdown = NULL;
 WSASend_t fpWSASend = NULL;
 WSARecv_t fpWSARecv = NULL;
 WSASendTo_t fpWSASendTo = NULL;
+WSARecvFrom_t fpWSARecvFrom = NULL;
 WSAConnectByNameA_t fpWSAConnectByNameA = NULL;
 WSAConnectByNameW_t fpWSAConnectByNameW = NULL;
 WSAIoctl_t fpWSAIoctl = NULL;
@@ -129,6 +135,7 @@ struct ConnectExContext {
     const char* sendBuf;
     DWORD sendLen;
     LPDWORD bytesSent;
+    bool isUdp = false;      // 是否为 UDP ConnectEx（用于 QUIC/HTTP3 的透明代理）
     ULONGLONG createdTick; // 记录创建时间，便于清理超时上下文
 };
 
@@ -140,6 +147,57 @@ static std::unordered_map<DWORD, LPFN_CONNECTEX> g_connectExOriginalByCatalog;
 // ConnectEx 目标函数指针可能被多个 Provider 复用，这里按“目标函数地址”记录 trampoline，便于复用与补全 Catalog 映射
 static std::unordered_map<void*, LPFN_CONNECTEX> g_connectExTrampolineByTarget;
 static const ULONGLONG kConnectExPendingTtlMs = 60000; // 超过 60 秒的上下文视为过期
+
+// ============= UDP/QUIC 代理支持（SOCKS5 UDP Associate） =============
+
+// UDP 代理上下文：每个 UDP socket 独立维护一个 UDP Associate（最简单、最可控）
+// 设计意图：避免多 socket 复用同一 relay 导致的回包归属问题（KISS 优先）。
+struct UdpProxyContext {
+    SOCKET udpSock = INVALID_SOCKET;
+    SOCKET controlSock = INVALID_SOCKET; // SOCKS5 UDP Associate 的 TCP 控制连接（需保持打开）
+    sockaddr_storage relayAddr{};        // 代理返回的 UDP relay 地址
+    int relayAddrLen = 0;
+    bool relayConnected = false;         // udpSock 是否已 connect 到 relayAddr
+
+    // 对于 connected UDP socket (send/recv)，需要记住“逻辑上的目标”，用于封装 SOCKS5 UDP 头
+    std::string defaultTargetHost;
+    uint16_t defaultTargetPort = 0;
+    bool hasDefaultTarget = false;
+
+    ULONGLONG createdTick = 0;
+};
+static std::unordered_map<SOCKET, UdpProxyContext> g_udpProxy;
+static std::mutex g_udpProxyMtx;
+
+// UDP Overlapped 上下文（用于 IOCP/CompletionRoutine 场景下解封装/调整 bytesTransferred）
+struct UdpOverlappedSendCtx {
+    SOCKET sock = INVALID_SOCKET;
+    std::vector<WSABUF> bufs;            // [0]=header, [1..]=用户 payload（仅复制描述符，不复制数据）
+    std::vector<uint8_t> header;         // SOCKS5 UDP 头（需保持到完成）
+    DWORD userBytes = 0;                 // 用户视角 payload bytes（不含 header）
+    LPDWORD userBytesPtr = nullptr;      // 指向用户 lpNumberOfBytesSent（可为空）
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE userCompletion = nullptr;
+};
+
+struct UdpOverlappedRecvCtx {
+    SOCKET sock = INVALID_SOCKET;
+    std::vector<uint8_t> recvBuf;        // 实际接收缓冲区（包含 SOCKS5 UDP 头 + payload）
+    LPWSABUF userBufs = nullptr;
+    DWORD userBufCount = 0;
+    LPDWORD userBytesPtr = nullptr;
+    LPDWORD userFlagsPtr = nullptr;
+
+    sockaddr* userFrom = nullptr;
+    LPINT userFromLen = nullptr;
+    sockaddr_storage fromTmp{};
+    int fromTmpLen = (int)sizeof(fromTmp);
+
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE userCompletion = nullptr;
+};
+
+static std::unordered_map<LPWSAOVERLAPPED, std::shared_ptr<UdpOverlappedSendCtx>> g_udpOvlSend;
+static std::unordered_map<LPWSAOVERLAPPED, std::shared_ptr<UdpOverlappedRecvCtx>> g_udpOvlRecv;
+static std::mutex g_udpOvlMtx;
 
 // 为了避免日志被大量非目标进程淹没，这里仅首次记录“跳过注入”的进程名
 static std::unordered_map<std::string, bool> g_loggedSkipProcesses;
@@ -481,6 +539,17 @@ static bool ShouldLogUdpBlock() {
     return Core::Logger::IsEnabled(Core::LogLevel::Debug);
 }
 
+// UDP 代理失败可能会触发 QUIC 的高频重试，这里同样做简单限流，避免日志/IO 影响性能
+static bool ShouldLogUdpProxyFail() {
+    static std::atomic<int> s_failCount{0};
+    const int n = s_failCount.fetch_add(1, std::memory_order_relaxed);
+    if (n < 20) return true;
+    if (n == 20) {
+        Core::Logger::Warn("UDP 代理失败日志过多，后续将仅在 [调试] 级别输出（避免 QUIC 重试导致日志/性能问题）");
+    }
+    return Core::Logger::IsEnabled(Core::LogLevel::Debug);
+}
+
 // 从 socket 读取当前端点信息（仅用于日志；失败时返回空字符串）
 static std::string GetPeerEndpoint(SOCKET s) {
     sockaddr_storage ss{};
@@ -596,6 +665,492 @@ static bool BuildProxyAddrV6(const Core::ProxyConfig& proxy, sockaddr_in6* proxy
     }
     proxyAddr->sin6_port = htons(proxy.port);
     return true;
+}
+
+// ============= UDP 代理辅助函数 =============
+
+static size_t SumWsabufBytes(const WSABUF* bufs, DWORD count) {
+    size_t total = 0;
+    if (!bufs) return 0;
+    for (DWORD i = 0; i < count; ++i) {
+        total += (size_t)bufs[i].len;
+    }
+    return total;
+}
+
+static size_t CopyBytesToWsabufs(const uint8_t* src, size_t srcLen, WSABUF* dstBufs, DWORD dstCount) {
+    if (!src || srcLen == 0 || !dstBufs || dstCount == 0) return 0;
+    size_t copied = 0;
+    for (DWORD i = 0; i < dstCount && copied < srcLen; ++i) {
+        char* dst = dstBufs[i].buf;
+        size_t cap = (size_t)dstBufs[i].len;
+        if (!dst || cap == 0) continue;
+        const size_t n = (srcLen - copied < cap) ? (srcLen - copied) : cap;
+        memcpy(dst, src + copied, n);
+        copied += n;
+    }
+    return copied;
+}
+
+static bool SendUdpPacketWithRetry(SOCKET s, const uint8_t* data, int len, int flags, int timeoutMs) {
+    if (!data || len <= 0) return true;
+    if (!fpSend) {
+        WSASetLastError(WSAEINVAL);
+        return false;
+    }
+    for (;;) {
+        int sent = fpSend(s, (const char*)data, len, flags);
+        if (sent == len) {
+            return true;
+        }
+        if (sent > 0) {
+            // UDP 理论上不应 partial send；这里按失败处理，避免上层误判
+            WSASetLastError(WSAEMSGSIZE);
+            return false;
+        }
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS) {
+            if (!Network::SocketIo::WaitWritable(s, timeoutMs)) return false;
+            continue;
+        }
+        WSASetLastError(err);
+        return false;
+    }
+}
+
+static bool FillUserSockaddr(sockaddr* userFrom, LPINT userFromLen, const sockaddr_storage& src, int srcLen) {
+    if (!userFromLen) return false;
+    if (!userFrom) {
+        // 用户没传 buffer，只能回填长度
+        *userFromLen = srcLen;
+        return true;
+    }
+    if (*userFromLen < srcLen) {
+        // buffer 不足：按 WSARecvFrom 语义，返回错误由调用方处理，这里仅回填需要的长度
+        *userFromLen = srcLen;
+        return false;
+    }
+    if (srcLen > 0) {
+        memcpy(userFrom, &src, (size_t)srcLen);
+        *userFromLen = srcLen;
+        return true;
+    }
+    *userFromLen = 0;
+    return true;
+}
+
+static bool BuildUdpRelayAddrForSocketFamily(int socketFamily, const sockaddr_storage& relay, int relayLen,
+                                             sockaddr_storage* out, int* outLen) {
+    if (!out || !outLen || relayLen <= 0) return false;
+    memset(out, 0, sizeof(sockaddr_storage));
+    *outLen = 0;
+
+    if (socketFamily == AF_INET) {
+        if (relay.ss_family == AF_INET && relayLen >= (int)sizeof(sockaddr_in)) {
+            memcpy(out, &relay, sizeof(sockaddr_in));
+            *outLen = (int)sizeof(sockaddr_in);
+            return true;
+        }
+        // IPv4 socket 无法直接 connect IPv6 relay
+        return false;
+    }
+
+    if (socketFamily == AF_INET6) {
+        if (relay.ss_family == AF_INET6 && relayLen >= (int)sizeof(sockaddr_in6)) {
+            memcpy(out, &relay, sizeof(sockaddr_in6));
+            *outLen = (int)sizeof(sockaddr_in6);
+            return true;
+        }
+        if (relay.ss_family == AF_INET && relayLen >= (int)sizeof(sockaddr_in)) {
+            // IPv4 relay 映射为 v4-mapped IPv6（兼容双栈 UDP socket）
+            const auto* a4 = (const sockaddr_in*)&relay;
+            sockaddr_in6 mapped{};
+            mapped.sin6_family = AF_INET6;
+            mapped.sin6_port = a4->sin_port;
+            memset(&mapped.sin6_addr, 0, sizeof(mapped.sin6_addr));
+            mapped.sin6_addr.u.Byte[10] = 0xff;
+            mapped.sin6_addr.u.Byte[11] = 0xff;
+            memcpy(&mapped.sin6_addr.u.Byte[12], &a4->sin_addr, sizeof(a4->sin_addr));
+            memcpy(out, &mapped, sizeof(mapped));
+            *outLen = (int)sizeof(mapped);
+            return true;
+        }
+        return false;
+    }
+
+    return false;
+}
+
+static SOCKET ConnectTcpToProxyServer(const Core::ProxyConfig& proxy) {
+    // 说明：UDP Associate 需要一个到代理的 TCP 控制连接
+    // 这里使用最小实现：仅支持 IP 直连或常规 DNS 解析（建议 proxy.host 填 127.0.0.1/::1）
+    int family = AF_INET;
+    in6_addr tmp6{};
+    if (!proxy.host.empty() && inet_pton(AF_INET6, proxy.host.c_str(), &tmp6) == 1) {
+        family = AF_INET6;
+    }
+
+    SOCKET tcpSock = socket(family, SOCK_STREAM, IPPROTO_TCP);
+    if (tcpSock == INVALID_SOCKET) {
+        int err = WSAGetLastError();
+        Core::Logger::Error("SOCKS5 UDP: 创建 TCP 控制连接失败, WSA错误码=" + std::to_string(err));
+        return INVALID_SOCKET;
+    }
+
+    // 非阻塞 connect + WaitConnect，避免卡死目标进程
+    u_long nb = 1;
+    ioctlsocket(tcpSock, FIONBIO, &nb);
+
+    sockaddr_storage proxyAddrSs{};
+    int proxyAddrLen = 0;
+    if (family == AF_INET6) {
+        sockaddr_in6 proxyAddr6{};
+        if (!BuildProxyAddrV6(proxy, &proxyAddr6, nullptr)) {
+            if (fpCloseSocket) fpCloseSocket(tcpSock);
+            return INVALID_SOCKET;
+        }
+        memcpy(&proxyAddrSs, &proxyAddr6, sizeof(proxyAddr6));
+        proxyAddrLen = (int)sizeof(proxyAddr6);
+    } else {
+        sockaddr_in proxyAddr{};
+        if (!BuildProxyAddr(proxy, &proxyAddr, nullptr)) {
+            if (fpCloseSocket) fpCloseSocket(tcpSock);
+            return INVALID_SOCKET;
+        }
+        memcpy(&proxyAddrSs, &proxyAddr, sizeof(proxyAddr));
+        proxyAddrLen = (int)sizeof(proxyAddr);
+    }
+
+    int rc = fpConnect ? fpConnect(tcpSock, (sockaddr*)&proxyAddrSs, proxyAddrLen)
+                       : connect(tcpSock, (sockaddr*)&proxyAddrSs, proxyAddrLen);
+    if (rc != 0) {
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS) {
+            auto& config = Core::Config::Instance();
+            if (!Network::SocketIo::WaitConnect(tcpSock, config.timeout.connect_ms)) {
+                int werr = WSAGetLastError();
+                Core::Logger::Error("SOCKS5 UDP: 连接代理服务器失败, proxy=" + proxy.host + ":" + std::to_string(proxy.port) +
+                                    ", WSA错误码=" + std::to_string(werr));
+                if (fpCloseSocket) fpCloseSocket(tcpSock);
+                return INVALID_SOCKET;
+            }
+        } else {
+            Core::Logger::Error("SOCKS5 UDP: 连接代理服务器失败, proxy=" + proxy.host + ":" + std::to_string(proxy.port) +
+                                ", WSA错误码=" + std::to_string(err));
+            if (fpCloseSocket) fpCloseSocket(tcpSock);
+            return INVALID_SOCKET;
+        }
+    }
+
+    // 连接完成后切回阻塞：后续握手使用 SocketIo::SendAll/RecvExact（内部兼容 EWOULDBLOCK）
+    nb = 0;
+    ioctlsocket(tcpSock, FIONBIO, &nb);
+    return tcpSock;
+}
+
+static void DropUdpOverlappedContext(LPWSAOVERLAPPED ovl) {
+    if (!ovl) return;
+    std::lock_guard<std::mutex> lock(g_udpOvlMtx);
+    g_udpOvlSend.erase(ovl);
+    g_udpOvlRecv.erase(ovl);
+}
+
+static void CleanupUdpOverlappedBySocket(SOCKET s) {
+    std::lock_guard<std::mutex> lock(g_udpOvlMtx);
+    for (auto it = g_udpOvlSend.begin(); it != g_udpOvlSend.end(); ) {
+        if (it->second && it->second->sock == s) it = g_udpOvlSend.erase(it);
+        else ++it;
+    }
+    for (auto it = g_udpOvlRecv.begin(); it != g_udpOvlRecv.end(); ) {
+        if (it->second && it->second->sock == s) it = g_udpOvlRecv.erase(it);
+        else ++it;
+    }
+}
+
+static void CleanupUdpProxyContext(SOCKET s) {
+    SOCKET control = INVALID_SOCKET;
+    {
+        std::lock_guard<std::mutex> lock(g_udpProxyMtx);
+        auto it = g_udpProxy.find(s);
+        if (it != g_udpProxy.end()) {
+            control = it->second.controlSock;
+            g_udpProxy.erase(it);
+        }
+    }
+    if (control != INVALID_SOCKET) {
+        // 关闭控制连接：使用原始 closesocket，避免递归进入 DetourCloseSocket
+        if (fpCloseSocket) fpCloseSocket(control);
+        else closesocket(control);
+    }
+    CleanupUdpOverlappedBySocket(s);
+}
+
+static bool EnsureUdpProxyReady(
+    SOCKET udpSock,
+    int socketFamily,
+    const std::string& defaultTargetHost,
+    uint16_t defaultTargetPort,
+    bool connectRelay = true
+) {
+    auto& config = Core::Config::Instance();
+    if (udpSock == INVALID_SOCKET) {
+        WSASetLastError(WSAEINVAL);
+        return false;
+    }
+
+    if (config.proxy.port == 0) {
+        WSASetLastError(WSAEINVAL);
+        return false;
+    }
+
+    // UDP 代理仅支持 SOCKS5（HTTP 代理没有标准的 UDP 转发能力）
+    if (config.proxy.type != "socks5") {
+        if (ShouldLogUdpProxyFail()) {
+            Core::Logger::Warn("UDP 代理仅支持 SOCKS5 (UDP Associate)。当前 proxy.type=" + config.proxy.type +
+                               "；若需 QUIC/HTTP3 请改用 socks5。将按 udp_fallback=" + config.rules.udp_fallback + " 处理。");
+        }
+        WSASetLastError(WSAEACCES);
+        return false;
+    }
+
+    // 1) 确保存在 UDP Associate 控制连接 + relay 地址
+    {
+        std::lock_guard<std::mutex> lock(g_udpProxyMtx);
+        auto it = g_udpProxy.find(udpSock);
+        if (it == g_udpProxy.end()) {
+            UdpProxyContext ctx{};
+            ctx.udpSock = udpSock;
+            ctx.createdTick = GetTickCount64();
+
+            SOCKET tcp = ConnectTcpToProxyServer(config.proxy);
+            if (tcp == INVALID_SOCKET) {
+                WSASetLastError(WSAECONNREFUSED);
+                return false;
+            }
+
+            Network::Socks5Udp::UdpAssociateResult assoc{};
+            if (!Network::Socks5Udp::UdpAssociate(tcp, nullptr, 0, &assoc)) {
+                if (fpCloseSocket) fpCloseSocket(tcp);
+                else closesocket(tcp);
+                WSASetLastError(WSAECONNREFUSED);
+                return false;
+            }
+
+            ctx.controlSock = tcp;
+            ctx.relayAddr = assoc.relayAddr;
+            ctx.relayAddrLen = assoc.relayAddrLen;
+            ctx.relayConnected = false;
+
+            g_udpProxy[udpSock] = std::move(ctx);
+            it = g_udpProxy.find(udpSock);
+        }
+
+        // 更新 default target（用于 send/WSASend 场景）
+        if (!defaultTargetHost.empty() && defaultTargetPort != 0) {
+            it->second.defaultTargetHost = defaultTargetHost;
+            it->second.defaultTargetPort = defaultTargetPort;
+            it->second.hasDefaultTarget = true;
+        }
+    }
+
+    // 2) 确保 UDP socket 已 connect 到 relay（让 select/IOCP/readiness 与原 socket 绑定，满足 QUIC 等高性能实现）
+    // 说明：ConnectEx(UDP) 场景下会由 original ConnectEx 完成 connect，此处允许跳过。
+    if (!connectRelay) {
+        return true;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_udpProxyMtx);
+        auto it = g_udpProxy.find(udpSock);
+        if (it == g_udpProxy.end()) {
+            WSASetLastError(WSAECONNREFUSED);
+            return false;
+        }
+        if (it->second.relayConnected) {
+            return true;
+        }
+        sockaddr_storage relayForSock{};
+        int relayForSockLen = 0;
+        if (!BuildUdpRelayAddrForSocketFamily(socketFamily, it->second.relayAddr, it->second.relayAddrLen, &relayForSock, &relayForSockLen)) {
+            Core::Logger::Error("UDP 代理: relay 地址族不兼容, sock=" + std::to_string((unsigned long long)udpSock) +
+                                ", socketFamily=" + std::to_string(socketFamily) +
+                                ", relayFamily=" + std::to_string((int)it->second.relayAddr.ss_family));
+            WSASetLastError(WSAEAFNOSUPPORT);
+            return false;
+        }
+
+        int rc = fpConnect ? fpConnect(udpSock, (sockaddr*)&relayForSock, relayForSockLen)
+                           : connect(udpSock, (sockaddr*)&relayForSock, relayForSockLen);
+        if (rc != 0) {
+            int err = WSAGetLastError();
+            Core::Logger::Error("UDP 代理: connect relay 失败, sock=" + std::to_string((unsigned long long)udpSock) +
+                                ", WSA错误码=" + std::to_string(err));
+            WSASetLastError(err);
+            return false;
+        }
+
+        // 仅在首次 connect relay 时输出，避免刷屏
+        const std::string relayStr = SockaddrToString((sockaddr*)&relayForSock);
+        Core::Logger::Info("UDP 代理 relay 已连接, sock=" + std::to_string((unsigned long long)udpSock) +
+                           (relayStr.empty() ? "" : (", relay=" + relayStr)));
+        it->second.relayConnected = true;
+        return true;
+    }
+}
+
+static bool TryGetUdpProxyDefaultTarget(SOCKET s, std::string* outHost, uint16_t* outPort) {
+    if (outHost) outHost->clear();
+    if (outPort) *outPort = 0;
+    std::lock_guard<std::mutex> lock(g_udpProxyMtx);
+    auto it = g_udpProxy.find(s);
+    if (it == g_udpProxy.end()) return false;
+    if (!it->second.hasDefaultTarget) return false;
+    if (outHost) *outHost = it->second.defaultTargetHost;
+    if (outPort) *outPort = it->second.defaultTargetPort;
+    return true;
+}
+
+static void UpdateUdpProxyDefaultTarget(SOCKET s, const std::string& host, uint16_t port) {
+    if (s == INVALID_SOCKET || host.empty() || port == 0) return;
+    std::lock_guard<std::mutex> lock(g_udpProxyMtx);
+    auto it = g_udpProxy.find(s);
+    if (it == g_udpProxy.end()) return;
+    it->second.defaultTargetHost = host;
+    it->second.defaultTargetPort = port;
+    it->second.hasDefaultTarget = true;
+}
+
+static bool TryGetUdpRelayAddr(SOCKET s, sockaddr_storage* out, int* outLen) {
+    if (!out || !outLen) return false;
+    std::lock_guard<std::mutex> lock(g_udpProxyMtx);
+    auto it = g_udpProxy.find(s);
+    if (it == g_udpProxy.end()) return false;
+    if (it->second.relayAddrLen <= 0) return false;
+    *out = it->second.relayAddr;
+    *outLen = it->second.relayAddrLen;
+    return true;
+}
+
+static void MarkUdpRelayConnected(SOCKET s) {
+    std::lock_guard<std::mutex> lock(g_udpProxyMtx);
+    auto it = g_udpProxy.find(s);
+    if (it == g_udpProxy.end()) return;
+    it->second.relayConnected = true;
+}
+
+static bool HandleUdpOverlappedCompletion(LPWSAOVERLAPPED ovl, DWORD internalBytes, DWORD* outUserBytes) {
+    if (!ovl) return false;
+
+    // 1) 发送：仅需要把 bytesTransferred 修正为 payload 长度
+    std::shared_ptr<UdpOverlappedSendCtx> sendCtx;
+    {
+        std::lock_guard<std::mutex> lock(g_udpOvlMtx);
+        auto it = g_udpOvlSend.find(ovl);
+        if (it != g_udpOvlSend.end()) {
+            sendCtx = it->second;
+            g_udpOvlSend.erase(it);
+        }
+    }
+    if (sendCtx) {
+        const DWORD userBytes = sendCtx->userBytes;
+        if (sendCtx->userBytesPtr) {
+            *sendCtx->userBytesPtr = userBytes;
+        }
+        if (outUserBytes) *outUserBytes = userBytes;
+        return true;
+    }
+
+    // 2) 接收：需要解封装并回填用户 buffers / from
+    std::shared_ptr<UdpOverlappedRecvCtx> recvCtx;
+    {
+        std::lock_guard<std::mutex> lock(g_udpOvlMtx);
+        auto it = g_udpOvlRecv.find(ovl);
+        if (it != g_udpOvlRecv.end()) {
+            recvCtx = it->second;
+            g_udpOvlRecv.erase(it);
+        }
+    }
+    if (!recvCtx) return false;
+
+    if (internalBytes == 0 || recvCtx->recvBuf.empty()) {
+        if (recvCtx->userBytesPtr) *recvCtx->userBytesPtr = 0;
+        if (outUserBytes) *outUserBytes = 0;
+        return true;
+    }
+
+    const size_t n = (size_t)internalBytes;
+    if (n > recvCtx->recvBuf.size()) {
+        if (recvCtx->userBytesPtr) *recvCtx->userBytesPtr = 0;
+        if (outUserBytes) *outUserBytes = 0;
+        return true;
+    }
+
+    Network::Socks5Udp::UnwrapResult unwrap{};
+    if (!Network::Socks5Udp::Unwrap(recvCtx->recvBuf.data(), n, &unwrap)) {
+        // 解封装失败：清空返回，避免上层解析到“代理协议头”
+        if (ShouldLogUdpProxyFail()) {
+            Core::Logger::Warn("UDP 解封装失败, sock=" + std::to_string((unsigned long long)recvCtx->sock) +
+                               ", bytes=" + std::to_string((unsigned long long)n) +
+                               " (可能原因: 代理不支持 UDP Associate / 收到非 SOCKS5 UDP 包 / 中间链路异常)");
+        }
+        if (recvCtx->userBytesPtr) *recvCtx->userBytesPtr = 0;
+        if (outUserBytes) *outUserBytes = 0;
+        return true;
+    }
+
+    // 回填 payload -> 用户缓冲区
+    const size_t copied = CopyBytesToWsabufs(unwrap.payload, unwrap.payloadLen, recvCtx->userBufs, recvCtx->userBufCount);
+
+    // 回填 from（若能解析出 sockaddr）
+    if (recvCtx->userFromLen) {
+        if (unwrap.srcLen > 0) {
+            FillUserSockaddr(recvCtx->userFrom, recvCtx->userFromLen, unwrap.src, unwrap.srcLen);
+        } else {
+            // domain 无法回填 sockaddr：保守回填 0，避免误导
+            *recvCtx->userFromLen = 0;
+        }
+    }
+
+    if (recvCtx->userBytesPtr) *recvCtx->userBytesPtr = (DWORD)copied;
+    if (outUserBytes) *outUserBytes = (DWORD)copied;
+    return true;
+}
+
+static void CALLBACK UdpProxyCompletionRoutine(
+    DWORD dwError,
+    DWORD cbTransferred,
+    LPWSAOVERLAPPED lpOverlapped,
+    DWORD dwFlags
+) {
+    // 设计意图：在 CompletionRoutine 模式下，尽量把“解封装/bytes 修正”发生在用户回调之前。
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE userCb = nullptr;
+    DWORD userBytes = cbTransferred;
+
+    if (lpOverlapped) {
+        // 先取出 user callback（因为 HandleUdpOverlappedCompletion 会 erase 上下文）
+        {
+            std::lock_guard<std::mutex> lock(g_udpOvlMtx);
+            auto itS = g_udpOvlSend.find(lpOverlapped);
+            if (itS != g_udpOvlSend.end() && itS->second) {
+                userCb = itS->second->userCompletion;
+            } else {
+                auto itR = g_udpOvlRecv.find(lpOverlapped);
+                if (itR != g_udpOvlRecv.end() && itR->second) {
+                    userCb = itR->second->userCompletion;
+                }
+            }
+        }
+
+        if (dwError == 0) {
+            HandleUdpOverlappedCompletion(lpOverlapped, cbTransferred, &userBytes);
+        } else {
+            // 失败：清理上下文，避免内存泄漏
+            DropUdpOverlappedContext(lpOverlapped);
+        }
+    }
+
+    if (userCb) {
+        userCb(dwError, userBytes, lpOverlapped, dwFlags);
+    }
 }
 
 // 按指定地址族解析目标地址
@@ -828,6 +1383,39 @@ static bool HandleConnectExCompletion(LPOVERLAPPED ovl, DWORD* outSentBytes) {
     if (!UpdateConnectExContext(ctx.sock)) {
         return false;
     }
+
+    // UDP ConnectEx：不做 TCP 握手，改为发送 SOCKS5 UDP 封装数据
+    if (ctx.isUdp) {
+        MarkUdpRelayConnected(ctx.sock);
+        UpdateUdpProxyDefaultTarget(ctx.sock, ctx.host, ctx.port);
+        RememberSocketTarget(ctx.sock, ctx.host, ctx.port);
+
+        if (ctx.sendBuf && ctx.sendLen > 0) {
+            std::vector<uint8_t> packet;
+            if (!Network::Socks5Udp::Wrap(ctx.host, ctx.port, (const uint8_t*)ctx.sendBuf, (size_t)ctx.sendLen, &packet)) {
+                WSASetLastError(WSAECONNREFUSED);
+                return false;
+            }
+            auto& config = Core::Config::Instance();
+            if (!SendUdpPacketWithRetry(ctx.sock, packet.data(), (int)packet.size(), 0, config.timeout.send_ms)) {
+                int err = WSAGetLastError();
+                Core::Logger::Error("ConnectEx(UDP) 发送首包失败, sock=" + std::to_string((unsigned long long)ctx.sock) +
+                                    ", bytes=" + std::to_string((unsigned long long)ctx.sendLen) +
+                                    ", WSA错误码=" + std::to_string(err));
+                WSASetLastError(err);
+                return false;
+            }
+            if (ctx.bytesSent) {
+                *ctx.bytesSent = (DWORD)ctx.sendLen; // 用户视角：仅 payload 长度
+            }
+            if (outSentBytes) {
+                *outSentBytes = (DWORD)ctx.sendLen;
+            }
+        }
+        return true;
+    }
+
+    // TCP ConnectEx：保持原逻辑（先握手，再可选发送首包）
     if (!DoProxyHandshake(ctx.sock, ctx.host, ctx.port)) {
         return false;
     }
@@ -861,6 +1449,274 @@ BOOL PASCAL DetourConnectEx(
     LPDWORD lpdwBytesSent,
     LPOVERLAPPED lpOverlapped
 );
+
+// ============= UDP 代理连接逻辑（用于 QUIC/HTTP3 等 UDP 协议） =============
+
+static bool ShouldProxyUdpByRule(const sockaddr* name, const std::string& originalHost, uint16_t originalPort) {
+    auto& config = Core::Config::Instance();
+    if (config.proxy.port == 0) return false;
+    if (config.rules.udp_mode != "proxy") return false;
+
+    // loopback 永远直连（避免递归与本地调试端口被误伤）
+    if (IsSockaddrLoopback(name) || IsLoopbackHost(originalHost)) return false;
+
+    // DNS 特殊处理：dns_mode=direct 时不代理 UDP 53
+    if (originalPort == 53 && (config.rules.dns_mode == "direct" || config.rules.dns_mode.empty())) {
+        return false;
+    }
+
+    // 端口白名单：不在白名单则不代理
+    if (!config.rules.IsPortAllowed(originalPort)) return false;
+
+    // IPv6 策略：纯 IPv6 连接先按 ipv6_mode 处理（与 TCP 路径保持一致）
+    if (name && name->sa_family == AF_INET6) {
+        const auto* a6 = (const sockaddr_in6*)name;
+        const bool isV4Mapped = IN6_IS_ADDR_V4MAPPED(&a6->sin6_addr);
+        if (!isV4Mapped) {
+            if (config.rules.ipv6_mode == "direct") return false;
+            if (config.rules.ipv6_mode == "block") return false;
+        }
+    }
+
+    // 路由规则：支持 protocols=["udp"] 做分流（不命中则走默认 action）
+    std::string addrIp;
+    bool addrIsV6 = false;
+    SockaddrToIp(name, &addrIp, &addrIsV6);
+    std::string routeAction;
+    std::string routeRule;
+    config.rules.MatchRouting(originalHost, addrIp, addrIsV6, originalPort, "udp", &routeAction, &routeRule);
+    routeAction = Core::ProxyRules::ToLower(std::move(routeAction));
+    if (routeAction == "direct") {
+        if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
+            Core::Logger::Debug("[Route] UDP direct, rule=" + (routeRule.empty() ? std::string("(default)") : routeRule) +
+                                ", target=" + originalHost + ":" + std::to_string(originalPort));
+        }
+        return false;
+    }
+
+    return true;
+}
+
+static int PerformProxyUdpConnect(SOCKET s, const sockaddr* name, int namelen, bool isWsa) {
+    auto& config = Core::Config::Instance();
+
+    std::string originalHost;
+    uint16_t originalPort = 0;
+    if (!ResolveOriginalTarget(name, &originalHost, &originalPort)) {
+        return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
+    }
+
+    // 保存“逻辑目标”，便于日志/后续 send(UDP) 封装
+    g_currentTarget.host = originalHost;
+    g_currentTarget.port = originalPort;
+
+    // direct 路径（含路由/策略）
+    if (!ShouldProxyUdpByRule(name, originalHost, originalPort)) {
+        if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
+            Core::Logger::Debug(std::string(isWsa ? "WSAConnect" : "connect") +
+                                ": UDP 直连, sock=" + std::to_string((unsigned long long)s) +
+                                ", target=" + originalHost + ":" + std::to_string(originalPort));
+        }
+        return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
+    }
+
+    // block IPv6（如果策略要求）
+    if (name && name->sa_family == AF_INET6) {
+        const auto* a6 = (const sockaddr_in6*)name;
+        const bool isV4Mapped = IN6_IS_ADDR_V4MAPPED(&a6->sin6_addr);
+        if (!isV4Mapped && config.rules.ipv6_mode == "block") {
+            const int err = WSAEACCES;
+            Core::Logger::Warn("UDP IPv6 已阻止(策略: ipv6_mode=block), sock=" + std::to_string((unsigned long long)s) +
+                               ", target=" + originalHost + ":" + std::to_string(originalPort) +
+                               ", WSA错误码=" + std::to_string(err));
+            WSASetLastError(err);
+            return SOCKET_ERROR;
+        }
+    }
+
+    // 确保 UDP Associate 就绪，并将本 socket connect 到 relay
+    if (!EnsureUdpProxyReady(s, name->sa_family, originalHost, originalPort, true)) {
+        // 失败降级：按配置回退 direct 或维持失败(block)
+        if (config.rules.udp_fallback == "direct") {
+            if (ShouldLogUdpProxyFail()) {
+                const int err = WSAGetLastError();
+                Core::Logger::Warn("UDP 代理失败，回退为 direct, sock=" + std::to_string((unsigned long long)s) +
+                                   ", target=" + originalHost + ":" + std::to_string(originalPort) +
+                                   ", WSA错误码=" + std::to_string(err));
+            }
+            CleanupUdpProxyContext(s);
+            return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
+        }
+        return SOCKET_ERROR;
+    }
+
+    RememberSocketTarget(s, originalHost, originalPort);
+    if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
+        Core::Logger::Debug(std::string(isWsa ? "WSAConnect" : "connect") +
+                            ": UDP 已重定向到 SOCKS5 relay, sock=" + std::to_string((unsigned long long)s) +
+                            ", target=" + originalHost + ":" + std::to_string(originalPort));
+    }
+    return 0;
+}
+
+static BOOL PerformProxyUdpConnectEx(
+    SOCKET s,
+    const sockaddr* name,
+    int namelen,
+    PVOID lpSendBuffer,
+    DWORD dwSendDataLength,
+    LPDWORD lpdwBytesSent,
+    LPOVERLAPPED lpOverlapped,
+    LPFN_CONNECTEX originalConnectEx
+) {
+    if (!originalConnectEx) {
+        WSASetLastError(WSAEINVAL);
+        return FALSE;
+    }
+
+    auto& config = Core::Config::Instance();
+
+    std::string originalHost;
+    uint16_t originalPort = 0;
+    if (!ResolveOriginalTarget(name, &originalHost, &originalPort)) {
+        return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+    }
+
+    // 保存“逻辑目标”，便于后续首包发送封装
+    g_currentTarget.host = originalHost;
+    g_currentTarget.port = originalPort;
+
+    if (!ShouldProxyUdpByRule(name, originalHost, originalPort)) {
+        return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+    }
+
+    if (name && name->sa_family == AF_INET6) {
+        const auto* a6 = (const sockaddr_in6*)name;
+        const bool isV4Mapped = IN6_IS_ADDR_V4MAPPED(&a6->sin6_addr);
+        if (!isV4Mapped && config.rules.ipv6_mode == "block") {
+            const int err = WSAEACCES;
+            Core::Logger::Warn("ConnectEx(UDP) IPv6 已阻止(策略: ipv6_mode=block), sock=" + std::to_string((unsigned long long)s) +
+                               ", target=" + originalHost + ":" + std::to_string(originalPort) +
+                               ", WSA错误码=" + std::to_string(err));
+            WSASetLastError(err);
+            return FALSE;
+        }
+    }
+
+    // 确保已获取 relay（但 connect 由 originalConnectEx 完成，以保持 Overlapped 语义）
+    if (!EnsureUdpProxyReady(s, name->sa_family, originalHost, originalPort, false)) {
+        if (config.rules.udp_fallback == "direct") {
+            if (ShouldLogUdpProxyFail()) {
+                const int err = WSAGetLastError();
+                Core::Logger::Warn("ConnectEx(UDP) 代理准备失败，回退为 direct, sock=" + std::to_string((unsigned long long)s) +
+                                   ", target=" + originalHost + ":" + std::to_string(originalPort) +
+                                   ", WSA错误码=" + std::to_string(err));
+            }
+            CleanupUdpProxyContext(s);
+            return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+        }
+        return FALSE;
+    }
+
+    sockaddr_storage relay{};
+    int relayLen = 0;
+    if (!TryGetUdpRelayAddr(s, &relay, &relayLen)) {
+        WSASetLastError(WSAECONNREFUSED);
+        if (config.rules.udp_fallback == "direct") {
+            if (ShouldLogUdpProxyFail()) {
+                Core::Logger::Warn("ConnectEx(UDP) 获取 relay 失败，回退为 direct, sock=" + std::to_string((unsigned long long)s) +
+                                   ", target=" + originalHost + ":" + std::to_string(originalPort));
+            }
+            CleanupUdpProxyContext(s);
+            return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+        }
+        return FALSE;
+    }
+
+    sockaddr_storage relayForSock{};
+    int relayForSockLen = 0;
+    if (!BuildUdpRelayAddrForSocketFamily(name->sa_family, relay, relayLen, &relayForSock, &relayForSockLen)) {
+        WSASetLastError(WSAEAFNOSUPPORT);
+        if (config.rules.udp_fallback == "direct") {
+            if (ShouldLogUdpProxyFail()) {
+                Core::Logger::Warn("ConnectEx(UDP) relay 地址族不兼容，回退为 direct, sock=" + std::to_string((unsigned long long)s) +
+                                   ", target=" + originalHost + ":" + std::to_string(originalPort));
+            }
+            CleanupUdpProxyContext(s);
+            return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+        }
+        return FALSE;
+    }
+
+    // 注意：不能把原始 lpSendBuffer 透传给 ConnectEx，否则应用会把“未封装的 UDP payload”发给 relay
+    DWORD ignoredBytes = 0;
+    BOOL result = originalConnectEx(
+        s, (sockaddr*)&relayForSock, relayForSockLen,
+        NULL, 0,
+        lpdwBytesSent ? lpdwBytesSent : &ignoredBytes,
+        lpOverlapped
+    );
+
+    if (!result) {
+        int err = WSAGetLastError();
+        if (err == WSA_IO_PENDING) {
+            if (lpOverlapped) {
+                ConnectExContext ctx{};
+                ctx.sock = s;
+                ctx.host = originalHost;
+                ctx.port = originalPort;
+                ctx.sendBuf = (const char*)lpSendBuffer;
+                ctx.sendLen = dwSendDataLength;
+                ctx.bytesSent = lpdwBytesSent;
+                ctx.isUdp = true;
+                SaveConnectExContext(lpOverlapped, ctx);
+            } else if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
+                Core::Logger::Debug("ConnectEx(UDP) 返回 WSA_IO_PENDING 但未提供 Overlapped, sock=" + std::to_string((unsigned long long)s) +
+                                    ", 目标=" + originalHost + ":" + std::to_string(originalPort));
+            }
+            return FALSE;
+        }
+        Core::Logger::Error("ConnectEx(UDP) 连接 relay 失败, sock=" + std::to_string((unsigned long long)s) +
+                            ", WSA错误码=" + std::to_string(err));
+        WSASetLastError(err);
+        if (config.rules.udp_fallback == "direct") {
+            if (ShouldLogUdpProxyFail()) {
+                Core::Logger::Warn("ConnectEx(UDP) 连接 relay 失败，回退为 direct, sock=" + std::to_string((unsigned long long)s) +
+                                   ", target=" + originalHost + ":" + std::to_string(originalPort) +
+                                   ", WSA错误码=" + std::to_string(err));
+            }
+            CleanupUdpProxyContext(s);
+            return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
+        }
+        return FALSE;
+    }
+
+    // 立即完成：此时需要同步发送首包（若有），并修正 bytesSent 为 payload 长度
+    UpdateConnectExContext(s);
+    MarkUdpRelayConnected(s);
+    UpdateUdpProxyDefaultTarget(s, originalHost, originalPort);
+    RememberSocketTarget(s, originalHost, originalPort);
+
+    if (lpSendBuffer && dwSendDataLength > 0) {
+        std::vector<uint8_t> packet;
+        if (!Network::Socks5Udp::Wrap(originalHost, originalPort, (const uint8_t*)lpSendBuffer, (size_t)dwSendDataLength, &packet)) {
+            WSASetLastError(WSAECONNREFUSED);
+            return FALSE;
+        }
+        if (!SendUdpPacketWithRetry(s, packet.data(), (int)packet.size(), 0, config.timeout.send_ms)) {
+            int serr = WSAGetLastError();
+            Core::Logger::Error("ConnectEx(UDP) 发送首包失败, sock=" + std::to_string((unsigned long long)s) +
+                                ", WSA错误码=" + std::to_string(serr));
+            WSASetLastError(serr);
+            return FALSE;
+        }
+        if (lpdwBytesSent) *lpdwBytesSent = dwSendDataLength;
+    } else {
+        if (lpdwBytesSent) *lpdwBytesSent = 0;
+    }
+
+    return TRUE;
+}
 
 // 执行代理连接逻辑
 int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool isWsa) {
@@ -904,31 +1760,41 @@ int PerformProxyConnect(SOCKET s, const struct sockaddr* name, int namelen, bool
         int soType = 0;
         TryGetSocketType(s, &soType);
 
-        // UDP 强阻断：默认阻断 UDP（除 DNS/loopback 例外），强制应用回退到 TCP 再走代理
-        // 设计意图：解决国内环境 QUIC/HTTP3(UDP) 绕过代理导致“看似已建隧道但仍不可用”的问题。
-        if (soType == SOCK_DGRAM && config.rules.udp_mode == "block") {
-            uint16_t dstPort = 0;
-            const bool hasPort = TryGetSockaddrPort(name, &dstPort);
-            const bool allowUdp = IsSockaddrLoopback(name) || (hasPort && dstPort == 53);
-            if (!allowUdp) {
-                const int err = WSAEACCES;
-                if (ShouldLogUdpBlock()) {
-                    const std::string api = isWsa ? "WSAConnect" : "connect";
-                    const std::string dst = SockaddrToString(name);
-                    Core::Logger::Warn(api + ": 已阻止 UDP 连接(策略: udp_mode=block, 说明: 禁用 QUIC/HTTP3), sock=" + std::to_string((unsigned long long)s) +
-                                       (dst.empty() ? "" : ", dst=" + dst) +
-                                       (hasPort ? (", port=" + std::to_string(dstPort)) : std::string("")) +
-                                       ", WSA错误码=" + std::to_string(err));
+        if (soType == SOCK_DGRAM) {
+            // UDP 强阻断：默认阻断 UDP（除 DNS/loopback 例外），强制应用回退到 TCP 再走代理
+            // 设计意图：解决国内环境 QUIC/HTTP3(UDP) 绕过代理导致“看似已建隧道但仍不可用”的问题。
+            if (config.rules.udp_mode == "block") {
+                uint16_t dstPort = 0;
+                const bool hasPort = TryGetSockaddrPort(name, &dstPort);
+                const bool allowUdp = IsSockaddrLoopback(name) || (hasPort && dstPort == 53);
+                if (!allowUdp) {
+                    const int err = WSAEACCES;
+                    if (ShouldLogUdpBlock()) {
+                        const std::string api = isWsa ? "WSAConnect" : "connect";
+                        const std::string dst = SockaddrToString(name);
+                        Core::Logger::Warn(api + ": 已阻止 UDP 连接(策略: udp_mode=block, 说明: 禁用 QUIC/HTTP3), sock=" + std::to_string((unsigned long long)s) +
+                                           (dst.empty() ? "" : ", dst=" + dst) +
+                                           (hasPort ? (", port=" + std::to_string(dstPort)) : std::string("")) +
+                                           ", WSA错误码=" + std::to_string(err));
+                    }
+                    WSASetLastError(err);
+                    return SOCKET_ERROR;
                 }
-                WSASetLastError(err);
-                return SOCKET_ERROR;
+                if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
+                    const std::string dst = SockaddrToString(name);
+                    Core::Logger::Debug(std::string(isWsa ? "WSAConnect" : "connect") +
+                                        ": UDP 直连已放行(例外), sock=" + std::to_string((unsigned long long)s) +
+                                        (dst.empty() ? "" : ", dst=" + dst));
+                }
+                return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
             }
-            if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
-                const std::string dst = SockaddrToString(name);
-                Core::Logger::Debug(std::string(isWsa ? "WSAConnect" : "connect") +
-                                    ": UDP 直连已放行(例外), sock=" + std::to_string((unsigned long long)s) +
-                                    (dst.empty() ? "" : ", dst=" + dst));
+
+            // UDP 走代理：用于 QUIC/HTTP3（通过 SOCKS5 UDP Associate）
+            if (config.rules.udp_mode == "proxy") {
+                return PerformProxyUdpConnect(s, name, namelen, isWsa);
             }
+
+            // udp_mode=direct：保持直连
             return isWsa ? fpWSAConnect(s, name, namelen, NULL, NULL, NULL, NULL) : fpConnect(s, name, namelen);
         }
 
@@ -1210,6 +2076,9 @@ int WSAAPI DetourCloseSocket(SOCKET s) {
         WSASetLastError(err);
         return rc;
     }
+
+    // UDP 代理：关闭对应的 UDP Associate 控制连接并清理 Overlapped 上下文
+    CleanupUdpProxyContext(s);
 
     // 关闭成功后清理映射，避免句柄复用导致的误关联
     ForgetSocketTarget(s);
@@ -1601,29 +2470,39 @@ BOOL PASCAL DetourConnectEx(
         int soType = 0;
         TryGetSocketType(s, &soType);
 
-        // UDP 强阻断：默认阻断 UDP（除 DNS/loopback 例外），强制应用回退到 TCP 再走代理
-        // 说明：ConnectEx 理论上主要用于 TCP，但部分运行库可能复用接口，这里保持策略一致。
-        if (soType == SOCK_DGRAM && config.rules.udp_mode == "block") {
-            uint16_t dstPort = 0;
-            const bool hasPort = TryGetSockaddrPort(name, &dstPort);
-            const bool allowUdp = IsSockaddrLoopback(name) || (hasPort && dstPort == 53);
-            if (!allowUdp) {
-                const int err = WSAEACCES;
-                if (ShouldLogUdpBlock()) {
-                    const std::string dst = SockaddrToString(name);
-                    Core::Logger::Warn("ConnectEx: 已阻止 UDP 连接(策略: udp_mode=block, 说明: 禁用 QUIC/HTTP3), sock=" + std::to_string((unsigned long long)s) +
-                                       (dst.empty() ? "" : ", dst=" + dst) +
-                                       (hasPort ? (", port=" + std::to_string(dstPort)) : std::string("")) +
-                                       ", WSA错误码=" + std::to_string(err));
+        if (soType == SOCK_DGRAM) {
+            // UDP 强阻断：默认阻断 UDP（除 DNS/loopback 例外），强制应用回退到 TCP 再走代理
+            // 说明：ConnectEx 可能被 QUIC/HTTP3 等用于 UDP，这里需要覆盖其行为。
+            if (config.rules.udp_mode == "block") {
+                uint16_t dstPort = 0;
+                const bool hasPort = TryGetSockaddrPort(name, &dstPort);
+                const bool allowUdp = IsSockaddrLoopback(name) || (hasPort && dstPort == 53);
+                if (!allowUdp) {
+                    const int err = WSAEACCES;
+                    if (ShouldLogUdpBlock()) {
+                        const std::string dst = SockaddrToString(name);
+                        Core::Logger::Warn("ConnectEx: 已阻止 UDP 连接(策略: udp_mode=block, 说明: 禁用 QUIC/HTTP3), sock=" + std::to_string((unsigned long long)s) +
+                                           (dst.empty() ? "" : ", dst=" + dst) +
+                                           (hasPort ? (", port=" + std::to_string(dstPort)) : std::string("")) +
+                                           ", WSA错误码=" + std::to_string(err));
+                    }
+                    WSASetLastError(err);
+                    return FALSE;
                 }
-                WSASetLastError(err);
-                return FALSE;
+                if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
+                    const std::string dst = SockaddrToString(name);
+                    Core::Logger::Debug("ConnectEx: UDP 直连已放行(例外), sock=" + std::to_string((unsigned long long)s) +
+                                        (dst.empty() ? "" : ", dst=" + dst));
+                }
+                return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
             }
-            if (Core::Logger::IsEnabled(Core::LogLevel::Debug)) {
-                const std::string dst = SockaddrToString(name);
-                Core::Logger::Debug("ConnectEx: UDP 直连已放行(例外), sock=" + std::to_string((unsigned long long)s) +
-                                    (dst.empty() ? "" : ", dst=" + dst));
+
+            // UDP 走代理：通过 SOCKS5 UDP Associate 转发（用于 QUIC/HTTP3）
+            if (config.rules.udp_mode == "proxy") {
+                return PerformProxyUdpConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped, originalConnectEx);
             }
+
+            // udp_mode=direct：保持直连
             return originalConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength, lpdwBytesSent, lpOverlapped);
         }
 
@@ -1856,10 +2735,20 @@ BOOL WSAAPI DetourWSAGetOverlappedResult(
         if (sentBytes > 0 && lpcbTransfer) {
             *lpcbTransfer = sentBytes;
         }
+
+        // UDP/QUIC：对 UDP Overlapped 的 bytes/缓冲区做修正（解封装 SOCKS5 UDP 头）
+        if (lpcbTransfer) {
+            DWORD userBytes = 0;
+            const DWORD internalBytes = *lpcbTransfer;
+            if (HandleUdpOverlappedCompletion(lpOverlapped, internalBytes, &userBytes)) {
+                *lpcbTransfer = userBytes;
+            }
+        }
     } else if (!result && lpOverlapped) {
         int err = WSAGetLastError();
         if (err != WSA_IO_INCOMPLETE) {
             DropConnectExContext(lpOverlapped);
+            DropUdpOverlappedContext(lpOverlapped);
         }
     }
     return result;
@@ -1888,8 +2777,18 @@ BOOL WINAPI DetourGetQueuedCompletionStatus(
         if (sentBytes > 0 && lpNumberOfBytes) {
             *lpNumberOfBytes = sentBytes;
         }
+
+        // UDP/QUIC：在 IOCP 出队前解封装并修正 bytesTransferred
+        if (lpNumberOfBytes) {
+            DWORD userBytes = 0;
+            const DWORD internalBytes = *lpNumberOfBytes;
+            if (HandleUdpOverlappedCompletion(*lpOverlapped, internalBytes, &userBytes)) {
+                *lpNumberOfBytes = userBytes;
+            }
+        }
     } else if (!result && lpOverlapped && *lpOverlapped) {
         DropConnectExContext(*lpOverlapped);
+        DropUdpOverlappedContext(*lpOverlapped);
     }
     return result;
 }
@@ -1933,6 +2832,7 @@ BOOL WINAPI DetourGetQueuedCompletionStatusEx(
                                         std::to_string(ioStatus) + ", 跳过握手");
                 }
                 DropConnectExContext(ovl);
+                DropUdpOverlappedContext((LPWSAOVERLAPPED)ovl);
                 continue;
             }
             
@@ -1948,6 +2848,13 @@ BOOL WINAPI DetourGetQueuedCompletionStatusEx(
                 // 回填 ConnectEx 首包发送字节数，提升与标准 ConnectEx 语义的一致性
                 lpCompletionPortEntries[i].dwNumberOfBytesTransferred = sentBytes;
             }
+
+            // UDP/QUIC：在 IOCP 出队前解封装并修正 bytesTransferred
+            DWORD userBytes = 0;
+            const DWORD internalBytes = lpCompletionPortEntries[i].dwNumberOfBytesTransferred;
+            if (HandleUdpOverlappedCompletion((LPWSAOVERLAPPED)ovl, internalBytes, &userBytes)) {
+                lpCompletionPortEntries[i].dwNumberOfBytesTransferred = userBytes;
+            }
         }
     } else if (!result && lpCompletionPortEntries && ulNumEntriesRemoved && *ulNumEntriesRemoved > 0) {
         // 失败时清理残留上下文，避免 Overlapped 复用导致错配
@@ -1955,6 +2862,7 @@ BOOL WINAPI DetourGetQueuedCompletionStatusEx(
             LPOVERLAPPED ovl = lpCompletionPortEntries[i].lpOverlapped;
             if (ovl) {
                 DropConnectExContext(ovl);
+                DropUdpOverlappedContext((LPWSAOVERLAPPED)ovl);
             }
         }
     }
@@ -2184,15 +3092,84 @@ BOOL WINAPI DetourCreateProcessA(
 // ============= Phase 3: send/recv Hook =============
 
 int WSAAPI DetourSend(SOCKET s, const char* buf, int len, int flags) {
-    // 流量监控日志
+    auto& config = Core::Config::Instance();
+
+    // UDP/QUIC：若该 UDP socket 已进入 udp_mode=proxy，则需要封装为 SOCKS5 UDP 报文
+    if (config.proxy.port != 0 && config.rules.udp_mode == "proxy") {
+        int soType = 0;
+        if (TryGetSocketType(s, &soType) && soType == SOCK_DGRAM) {
+            std::string host;
+            uint16_t port = 0;
+            if (TryGetUdpProxyDefaultTarget(s, &host, &port) && !host.empty() && port != 0) {
+                sockaddr_storage local{};
+                int localLen = (int)sizeof(local);
+                const int family = (getsockname(s, (sockaddr*)&local, &localLen) == 0) ? (int)local.ss_family : AF_INET;
+
+                if (!EnsureUdpProxyReady(s, family, host, port, true)) {
+                    return SOCKET_ERROR;
+                }
+
+                std::vector<uint8_t> packet;
+                if (!Network::Socks5Udp::Wrap(host, port, (const uint8_t*)buf, (size_t)len, &packet)) {
+                    WSASetLastError(WSAECONNREFUSED);
+                    return SOCKET_ERROR;
+                }
+
+                if (!SendUdpPacketWithRetry(s, packet.data(), (int)packet.size(), flags, config.timeout.send_ms)) {
+                    return SOCKET_ERROR;
+                }
+
+                // 流量监控日志：记录用户 payload（不含 SOCKS5 UDP 头）
+                Network::TrafficMonitor::Instance().LogSend(s, buf, len);
+                return len;
+            }
+        }
+    }
+
+    // 默认：保持原语义
     Network::TrafficMonitor::Instance().LogSend(s, buf, len);
     return fpSend(s, buf, len, flags);
 }
 
 int WSAAPI DetourRecv(SOCKET s, char* buf, int len, int flags) {
+    auto& config = Core::Config::Instance();
+
+    // UDP/QUIC：若该 UDP socket 已进入 udp_mode=proxy，则 recv 得到的是 SOCKS5 UDP Reply，需要解封装
+    if (config.proxy.port != 0 && config.rules.udp_mode == "proxy") {
+        int soType = 0;
+        if (TryGetSocketType(s, &soType) && soType == SOCK_DGRAM) {
+            sockaddr_storage relay{};
+            int relayLen = 0;
+            if (TryGetUdpRelayAddr(s, &relay, &relayLen)) {
+                const int cap = len + (int)Network::Socks5Udp::kMaxUdpHeaderBytes;
+                std::vector<uint8_t> tmp;
+                tmp.resize(cap > 0 ? (size_t)cap : 0);
+
+                int rc = fpRecv(s, (char*)tmp.data(), (int)tmp.size(), flags);
+                if (rc <= 0) return rc;
+
+                Network::Socks5Udp::UnwrapResult unwrap{};
+                if (!Network::Socks5Udp::Unwrap(tmp.data(), (size_t)rc, &unwrap)) {
+                    WSASetLastError(WSAECONNRESET);
+                    return SOCKET_ERROR;
+                }
+
+                const size_t payloadLen = unwrap.payloadLen;
+                if ((int)payloadLen > len) {
+                    memcpy(buf, unwrap.payload, (size_t)len);
+                    WSASetLastError(WSAEMSGSIZE);
+                    return SOCKET_ERROR;
+                }
+
+                memcpy(buf, unwrap.payload, payloadLen);
+                Network::TrafficMonitor::Instance().LogRecv(s, buf, (int)payloadLen);
+                return (int)payloadLen;
+            }
+        }
+    }
+
     int result = fpRecv(s, buf, len, flags);
     if (result > 0) {
-        // 流量监控日志 (仅记录实际接收的数据)
         Network::TrafficMonitor::Instance().LogRecv(s, buf, result);
     }
     return result;
@@ -2204,6 +3181,92 @@ int WSAAPI DetourWSASend(
     LPWSAOVERLAPPED lpOverlapped,
     LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
 ) {
+    auto& config = Core::Config::Instance();
+
+    // UDP/QUIC：connected UDP socket 可能走 WSASend，需要封装 SOCKS5 UDP 头
+    if (config.proxy.port != 0 && config.rules.udp_mode == "proxy") {
+        int soType = 0;
+        if (TryGetSocketType(s, &soType) && soType == SOCK_DGRAM) {
+            std::string host;
+            uint16_t port = 0;
+            if (TryGetUdpProxyDefaultTarget(s, &host, &port) && !host.empty() && port != 0) {
+                sockaddr_storage local{};
+                int localLen = (int)sizeof(local);
+                const int family = (getsockname(s, (sockaddr*)&local, &localLen) == 0) ? (int)local.ss_family : AF_INET;
+
+                if (!EnsureUdpProxyReady(s, family, host, port, true)) {
+                    return SOCKET_ERROR;
+                }
+
+                std::vector<uint8_t> header;
+                if (!Network::Socks5Udp::Wrap(host, port, nullptr, 0, &header)) {
+                    WSASetLastError(WSAECONNREFUSED);
+                    return SOCKET_ERROR;
+                }
+
+                const DWORD userBytes = (DWORD)SumWsabufBytes(lpBuffers, dwBufferCount);
+
+                // 流量监控日志：记录用户 payload（不含 SOCKS5 UDP 头）
+                if (lpBuffers && dwBufferCount > 0) {
+                    Network::TrafficMonitor::Instance().LogSend(s, lpBuffers[0].buf, lpBuffers[0].len);
+                }
+
+                if (!lpOverlapped) {
+                    std::vector<WSABUF> bufs;
+                    bufs.reserve((size_t)dwBufferCount + 1);
+                    WSABUF h{};
+                    h.buf = (CHAR*)header.data();
+                    h.len = (ULONG)header.size();
+                    bufs.push_back(h);
+                    for (DWORD i = 0; i < dwBufferCount; ++i) {
+                        bufs.push_back(lpBuffers[i]);
+                    }
+                    int rc = fpWSASend(s, bufs.data(), (DWORD)bufs.size(), lpNumberOfBytesSent, dwFlags, NULL, NULL);
+                    if (rc == 0 && lpNumberOfBytesSent) {
+                        *lpNumberOfBytesSent = userBytes;
+                    }
+                    return rc;
+                }
+
+                auto ctx = std::make_shared<UdpOverlappedSendCtx>();
+                ctx->sock = s;
+                ctx->header = std::move(header);
+                ctx->userBytes = userBytes;
+                ctx->userBytesPtr = lpNumberOfBytesSent;
+                ctx->userCompletion = lpCompletionRoutine;
+
+                ctx->bufs.reserve((size_t)dwBufferCount + 1);
+                WSABUF h{};
+                h.buf = (CHAR*)ctx->header.data();
+                h.len = (ULONG)ctx->header.size();
+                ctx->bufs.push_back(h);
+                for (DWORD i = 0; i < dwBufferCount; ++i) {
+                    ctx->bufs.push_back(lpBuffers[i]);
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(g_udpOvlMtx);
+                    g_udpOvlSend[lpOverlapped] = ctx;
+                }
+
+                const auto cb = lpCompletionRoutine ? UdpProxyCompletionRoutine : nullptr;
+                int rc = fpWSASend(s, ctx->bufs.data(), (DWORD)ctx->bufs.size(), lpNumberOfBytesSent, dwFlags, lpOverlapped, cb);
+                if (rc == SOCKET_ERROR) {
+                    int err = WSAGetLastError();
+                    if (err != WSA_IO_PENDING) {
+                        DropUdpOverlappedContext(lpOverlapped);
+                    } else {
+                        if (lpNumberOfBytesSent) *lpNumberOfBytesSent = 0;
+                    }
+                    WSASetLastError(err);
+                    return SOCKET_ERROR;
+                }
+                if (lpNumberOfBytesSent) *lpNumberOfBytesSent = userBytes;
+                return rc;
+            }
+        }
+    }
+
     // 流量监控日志 (记录第一个缓冲区)
     if (lpBuffers && dwBufferCount > 0) {
         Network::TrafficMonitor::Instance().LogSend(s, lpBuffers[0].buf, lpBuffers[0].len);
@@ -2217,12 +3280,268 @@ int WSAAPI DetourWSARecv(
     LPWSAOVERLAPPED lpOverlapped,
     LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
 ) {
+    auto& config = Core::Config::Instance();
+
+    // UDP/QUIC：connected UDP socket 可能走 WSARecv，需要解封装 SOCKS5 UDP Reply
+    if (config.proxy.port != 0 && config.rules.udp_mode == "proxy") {
+        int soType = 0;
+        if (TryGetSocketType(s, &soType) && soType == SOCK_DGRAM) {
+            sockaddr_storage relay{};
+            int relayLen = 0;
+            if (TryGetUdpRelayAddr(s, &relay, &relayLen)) {
+                const size_t userCap = SumWsabufBytes(lpBuffers, dwBufferCount);
+                const size_t cap = userCap + Network::Socks5Udp::kMaxUdpHeaderBytes;
+
+                if (!lpOverlapped) {
+                    std::vector<uint8_t> tmp;
+                    tmp.resize(cap);
+                    WSABUF ib{};
+                    ib.buf = (CHAR*)tmp.data();
+                    ib.len = (ULONG)tmp.size();
+
+                    DWORD bytes = 0;
+                    int rc = fpWSARecv(s, &ib, 1, &bytes, lpFlags, NULL, NULL);
+                    if (rc != 0) return rc;
+
+                    Network::Socks5Udp::UnwrapResult unwrap{};
+                    if (!Network::Socks5Udp::Unwrap(tmp.data(), (size_t)bytes, &unwrap)) {
+                        WSASetLastError(WSAECONNRESET);
+                        return SOCKET_ERROR;
+                    }
+
+                    const size_t copied = CopyBytesToWsabufs(unwrap.payload, unwrap.payloadLen, lpBuffers, dwBufferCount);
+                    if (lpNumberOfBytesRecvd) *lpNumberOfBytesRecvd = (DWORD)copied;
+                    if (copied < unwrap.payloadLen) {
+                        WSASetLastError(WSAEMSGSIZE);
+                        return SOCKET_ERROR;
+                    }
+                    if (lpBuffers && dwBufferCount > 0 && copied > 0) {
+                        Network::TrafficMonitor::Instance().LogRecv(s, lpBuffers[0].buf, (int)copied);
+                    }
+                    return 0;
+                }
+
+                auto ctx = std::make_shared<UdpOverlappedRecvCtx>();
+                ctx->sock = s;
+                ctx->recvBuf.resize(cap);
+                ctx->userBufs = lpBuffers;
+                ctx->userBufCount = dwBufferCount;
+                ctx->userBytesPtr = lpNumberOfBytesRecvd;
+                ctx->userFlagsPtr = lpFlags;
+                ctx->userCompletion = lpCompletionRoutine;
+
+                WSABUF ib{};
+                ib.buf = (CHAR*)ctx->recvBuf.data();
+                ib.len = (ULONG)ctx->recvBuf.size();
+
+                {
+                    std::lock_guard<std::mutex> lock(g_udpOvlMtx);
+                    g_udpOvlRecv[lpOverlapped] = ctx;
+                }
+
+                const auto cb = lpCompletionRoutine ? UdpProxyCompletionRoutine : nullptr;
+                int rc = fpWSARecv(s, &ib, 1, lpNumberOfBytesRecvd, lpFlags, lpOverlapped, cb);
+                if (rc == SOCKET_ERROR) {
+                    int err = WSAGetLastError();
+                    if (err != WSA_IO_PENDING) {
+                        DropUdpOverlappedContext(lpOverlapped);
+                    } else {
+                        if (lpNumberOfBytesRecvd) *lpNumberOfBytesRecvd = 0;
+                    }
+                    WSASetLastError(err);
+                    return SOCKET_ERROR;
+                }
+
+                // 立即完成：立刻解封装并回填用户 buffers（避免上层读到 SOCKS5 UDP 头）
+                if (lpNumberOfBytesRecvd) {
+                    DWORD userBytes = 0;
+                    const DWORD internalBytes = *lpNumberOfBytesRecvd;
+                    HandleUdpOverlappedCompletion(lpOverlapped, internalBytes, &userBytes);
+                    *lpNumberOfBytesRecvd = userBytes;
+                }
+                if (lpCompletionRoutine) {
+                    const DWORD cbFlags = lpFlags ? *lpFlags : 0;
+                    lpCompletionRoutine(0, lpNumberOfBytesRecvd ? *lpNumberOfBytesRecvd : 0, lpOverlapped, cbFlags);
+                }
+                return rc;
+            }
+        }
+    }
+
     int result = fpWSARecv(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpOverlapped, lpCompletionRoutine);
     // 注意：异步操作无法立即获取数据，仅记录同步接收
     if (result == 0 && lpNumberOfBytesRecvd && *lpNumberOfBytesRecvd > 0 && lpBuffers && dwBufferCount > 0) {
         Network::TrafficMonitor::Instance().LogRecv(s, lpBuffers[0].buf, *lpNumberOfBytesRecvd);
     }
     return result;
+}
+
+// ============= UDP 接收：recvfrom / WSARecvFrom Hook =============
+
+int WSAAPI DetourRecvFrom(SOCKET s, char* buf, int len, int flags, struct sockaddr* from, int* fromlen) {
+    if (!fpRecvFrom) {
+        WSASetLastError(WSAEINVAL);
+        return SOCKET_ERROR;
+    }
+
+    auto& config = Core::Config::Instance();
+    if (config.proxy.port != 0 && config.rules.udp_mode == "proxy") {
+        int soType = 0;
+        if (TryGetSocketType(s, &soType) && soType == SOCK_DGRAM) {
+            sockaddr_storage relay{};
+            int relayLen = 0;
+            if (TryGetUdpRelayAddr(s, &relay, &relayLen)) {
+                const int cap = len + (int)Network::Socks5Udp::kMaxUdpHeaderBytes;
+                std::vector<uint8_t> tmp;
+                tmp.resize(cap > 0 ? (size_t)cap : 0);
+
+                sockaddr_storage fromTmp{};
+                int fromTmpLen = (int)sizeof(fromTmp);
+                int rc = fpRecvFrom(s, (char*)tmp.data(), (int)tmp.size(), flags, (sockaddr*)&fromTmp, &fromTmpLen);
+                if (rc <= 0) return rc;
+
+                Network::Socks5Udp::UnwrapResult unwrap{};
+                if (!Network::Socks5Udp::Unwrap(tmp.data(), (size_t)rc, &unwrap)) {
+                    WSASetLastError(WSAECONNRESET);
+                    return SOCKET_ERROR;
+                }
+
+                if (fromlen) {
+                    if (unwrap.srcLen > 0) {
+                        FillUserSockaddr(from, fromlen, unwrap.src, unwrap.srcLen);
+                    } else {
+                        *fromlen = 0;
+                    }
+                }
+
+                if ((int)unwrap.payloadLen > len) {
+                    memcpy(buf, unwrap.payload, (size_t)len);
+                    WSASetLastError(WSAEMSGSIZE);
+                    return SOCKET_ERROR;
+                }
+
+                memcpy(buf, unwrap.payload, unwrap.payloadLen);
+                Network::TrafficMonitor::Instance().LogRecv(s, buf, (int)unwrap.payloadLen);
+                return (int)unwrap.payloadLen;
+            }
+        }
+    }
+
+    return fpRecvFrom(s, buf, len, flags, from, fromlen);
+}
+
+int WSAAPI DetourWSARecvFrom(
+    SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
+    LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags,
+    struct sockaddr* lpFrom, LPINT lpFromlen,
+    LPWSAOVERLAPPED lpOverlapped,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
+) {
+    if (!fpWSARecvFrom) {
+        WSASetLastError(WSAEINVAL);
+        return SOCKET_ERROR;
+    }
+
+    auto& config = Core::Config::Instance();
+    if (config.proxy.port != 0 && config.rules.udp_mode == "proxy") {
+        int soType = 0;
+        if (TryGetSocketType(s, &soType) && soType == SOCK_DGRAM) {
+            sockaddr_storage relay{};
+            int relayLen = 0;
+            if (TryGetUdpRelayAddr(s, &relay, &relayLen)) {
+                const size_t userCap = SumWsabufBytes(lpBuffers, dwBufferCount);
+                const size_t cap = userCap + Network::Socks5Udp::kMaxUdpHeaderBytes;
+
+                if (!lpOverlapped) {
+                    std::vector<uint8_t> tmp;
+                    tmp.resize(cap);
+                    WSABUF ib{};
+                    ib.buf = (CHAR*)tmp.data();
+                    ib.len = (ULONG)tmp.size();
+
+                    sockaddr_storage fromTmp{};
+                    int fromTmpLen = (int)sizeof(fromTmp);
+                    DWORD bytes = 0;
+                    int rc = fpWSARecvFrom(s, &ib, 1, &bytes, lpFlags, (sockaddr*)&fromTmp, &fromTmpLen, NULL, NULL);
+                    if (rc != 0) return rc;
+
+                    Network::Socks5Udp::UnwrapResult unwrap{};
+                    if (!Network::Socks5Udp::Unwrap(tmp.data(), (size_t)bytes, &unwrap)) {
+                        WSASetLastError(WSAECONNRESET);
+                        return SOCKET_ERROR;
+                    }
+
+                    const size_t copied = CopyBytesToWsabufs(unwrap.payload, unwrap.payloadLen, lpBuffers, dwBufferCount);
+                    if (lpNumberOfBytesRecvd) *lpNumberOfBytesRecvd = (DWORD)copied;
+                    if (lpFromlen) {
+                        if (unwrap.srcLen > 0) {
+                            FillUserSockaddr(lpFrom, lpFromlen, unwrap.src, unwrap.srcLen);
+                        } else {
+                            *lpFromlen = 0;
+                        }
+                    }
+                    if (copied < unwrap.payloadLen) {
+                        WSASetLastError(WSAEMSGSIZE);
+                        return SOCKET_ERROR;
+                    }
+                    if (lpBuffers && dwBufferCount > 0 && copied > 0) {
+                        Network::TrafficMonitor::Instance().LogRecv(s, lpBuffers[0].buf, (int)copied);
+                    }
+                    return 0;
+                }
+
+                auto ctx = std::make_shared<UdpOverlappedRecvCtx>();
+                ctx->sock = s;
+                ctx->recvBuf.resize(cap);
+                ctx->userBufs = lpBuffers;
+                ctx->userBufCount = dwBufferCount;
+                ctx->userBytesPtr = lpNumberOfBytesRecvd;
+                ctx->userFlagsPtr = lpFlags;
+                ctx->userFrom = lpFrom;
+                ctx->userFromLen = lpFromlen;
+                ctx->userCompletion = lpCompletionRoutine;
+
+                WSABUF ib{};
+                ib.buf = (CHAR*)ctx->recvBuf.data();
+                ib.len = (ULONG)ctx->recvBuf.size();
+
+                {
+                    std::lock_guard<std::mutex> lock(g_udpOvlMtx);
+                    g_udpOvlRecv[lpOverlapped] = ctx;
+                }
+
+                const auto cb = lpCompletionRoutine ? UdpProxyCompletionRoutine : nullptr;
+                int rc = fpWSARecvFrom(s, &ib, 1, lpNumberOfBytesRecvd, lpFlags,
+                                       (sockaddr*)&ctx->fromTmp, &ctx->fromTmpLen,
+                                       lpOverlapped, cb);
+                if (rc == SOCKET_ERROR) {
+                    int err = WSAGetLastError();
+                    if (err != WSA_IO_PENDING) {
+                        DropUdpOverlappedContext(lpOverlapped);
+                    } else {
+                        if (lpNumberOfBytesRecvd) *lpNumberOfBytesRecvd = 0;
+                    }
+                    WSASetLastError(err);
+                    return SOCKET_ERROR;
+                }
+
+                // 立即完成：立刻解封装并回填用户 buffers / from
+                if (lpNumberOfBytesRecvd) {
+                    DWORD userBytes = 0;
+                    const DWORD internalBytes = *lpNumberOfBytesRecvd;
+                    HandleUdpOverlappedCompletion(lpOverlapped, internalBytes, &userBytes);
+                    *lpNumberOfBytesRecvd = userBytes;
+                }
+                if (lpCompletionRoutine) {
+                    const DWORD cbFlags = lpFlags ? *lpFlags : 0;
+                    lpCompletionRoutine(0, lpNumberOfBytesRecvd ? *lpNumberOfBytesRecvd : 0, lpOverlapped, cbFlags);
+                }
+                return rc;
+            }
+        }
+    }
+
+    return fpWSARecvFrom(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpFrom, lpFromlen, lpOverlapped, lpCompletionRoutine);
 }
 
 // ============= UDP 强阻断: sendto / WSASendTo Hook =============
@@ -2234,7 +3553,7 @@ int WSAAPI DetourSendTo(SOCKET s, const char* buf, int len, int flags, const str
     }
 
     auto& config = Core::Config::Instance();
-    if (config.proxy.port != 0 && config.rules.udp_mode == "block") {
+    if (config.proxy.port != 0) {
         int soType = 0;
         if (TryGetSocketType(s, &soType) && soType == SOCK_DGRAM) {
             sockaddr_storage peer{};
@@ -2246,20 +3565,89 @@ int WSAAPI DetourSendTo(SOCKET s, const char* buf, int len, int flags, const str
                 }
             }
 
-            uint16_t dstPort = 0;
-            const bool hasPort = TryGetSockaddrPort(dst, &dstPort);
-            const bool allowUdp = dst && (IsSockaddrLoopback(dst) || (hasPort && dstPort == 53));
-            if (!allowUdp) {
-                const int err = WSAEACCES;
-                if (ShouldLogUdpBlock()) {
-                    const std::string dstStr = dst ? SockaddrToString(dst) : std::string("(未知)");
-                    Core::Logger::Warn("sendto: 已阻止 UDP 发送(策略: udp_mode=block, 说明: 禁用 QUIC/HTTP3), sock=" + std::to_string((unsigned long long)s) +
-                                       ", dst=" + dstStr +
-                                       (hasPort ? (", port=" + std::to_string(dstPort)) : std::string("")) +
-                                       ", WSA错误码=" + std::to_string(err));
+            // udp_mode=block：保持旧行为
+            if (config.rules.udp_mode == "block") {
+                uint16_t dstPort = 0;
+                const bool hasPort = TryGetSockaddrPort(dst, &dstPort);
+                const bool allowUdp = dst && (IsSockaddrLoopback(dst) || (hasPort && dstPort == 53));
+                if (!allowUdp) {
+                    const int err = WSAEACCES;
+                    if (ShouldLogUdpBlock()) {
+                        const std::string dstStr = dst ? SockaddrToString(dst) : std::string("(未知)");
+                        Core::Logger::Warn("sendto: 已阻止 UDP 发送(策略: udp_mode=block, 说明: 禁用 QUIC/HTTP3), sock=" + std::to_string((unsigned long long)s) +
+                                           ", dst=" + dstStr +
+                                           (hasPort ? (", port=" + std::to_string(dstPort)) : std::string("")) +
+                                           ", WSA错误码=" + std::to_string(err));
+                    }
+                    WSASetLastError(err);
+                    return SOCKET_ERROR;
                 }
-                WSASetLastError(err);
-                return SOCKET_ERROR;
+                return fpSendTo(s, buf, len, flags, to, tolen);
+            }
+
+            // udp_mode=proxy：封装为 SOCKS5 UDP 报文并发给 relay
+            if (config.rules.udp_mode == "proxy") {
+                std::string host;
+                uint16_t port = 0;
+                int family = AF_INET;
+                if (dst) {
+                    family = (int)dst->sa_family;
+                    if (!ResolveOriginalTarget(dst, &host, &port) || host.empty() || port == 0) {
+                        WSASetLastError(WSAEINVAL);
+                        return SOCKET_ERROR;
+                    }
+                    if (!ShouldProxyUdpByRule(dst, host, port)) {
+                        return fpSendTo(s, buf, len, flags, to, tolen);
+                    }
+                } else {
+                    // sendto(to=null) = 发送到“已连接目标”。若该 socket 已处于 UDP 代理模式，使用保存的 default target。
+                    if (!TryGetUdpProxyDefaultTarget(s, &host, &port) || host.empty() || port == 0) {
+                        WSASetLastError(WSAEDESTADDRREQ);
+                        return SOCKET_ERROR;
+                    }
+                    sockaddr_storage local{};
+                    int localLen = (int)sizeof(local);
+                    if (getsockname(s, (sockaddr*)&local, &localLen) == 0) {
+                        family = (int)local.ss_family;
+                    }
+                }
+
+                if (!EnsureUdpProxyReady(s, family, host, port, true)) {
+                    if (config.rules.udp_fallback == "direct" && dst) {
+                        if (ShouldLogUdpProxyFail()) {
+                            const int err = WSAGetLastError();
+                            Core::Logger::Warn("sendto: UDP 代理失败，回退为 direct, sock=" + std::to_string((unsigned long long)s) +
+                                               ", target=" + host + ":" + std::to_string(port) +
+                                               ", WSA错误码=" + std::to_string(err));
+                        }
+                        CleanupUdpProxyContext(s);
+                        return fpSendTo(s, buf, len, flags, to, tolen);
+                    }
+                    return SOCKET_ERROR;
+                }
+                UpdateUdpProxyDefaultTarget(s, host, port);
+                RememberSocketTarget(s, host, port);
+
+                std::vector<uint8_t> packet;
+                if (!Network::Socks5Udp::Wrap(host, port, (const uint8_t*)buf, (size_t)len, &packet)) {
+                    if (config.rules.udp_fallback == "direct" && dst) {
+                        if (ShouldLogUdpProxyFail()) {
+                            Core::Logger::Warn("sendto: UDP 封装失败，回退为 direct, sock=" + std::to_string((unsigned long long)s) +
+                                               ", target=" + host + ":" + std::to_string(port));
+                        }
+                        CleanupUdpProxyContext(s);
+                        return fpSendTo(s, buf, len, flags, to, tolen);
+                    }
+                    WSASetLastError(WSAECONNREFUSED);
+                    return SOCKET_ERROR;
+                }
+
+                int sent = fpSend ? fpSend(s, (const char*)packet.data(), (int)packet.size(), flags)
+                                  : send(s, (const char*)packet.data(), (int)packet.size(), flags);
+                if (sent == SOCKET_ERROR) {
+                    return SOCKET_ERROR;
+                }
+                return len; // 用户视角：仅 payload 长度
             }
         }
     }
@@ -2280,7 +3668,7 @@ int WSAAPI DetourWSASendTo(
     }
 
     auto& config = Core::Config::Instance();
-    if (config.proxy.port != 0 && config.rules.udp_mode == "block") {
+    if (config.proxy.port != 0) {
         int soType = 0;
         if (TryGetSocketType(s, &soType) && soType == SOCK_DGRAM) {
             sockaddr_storage peer{};
@@ -2292,23 +3680,150 @@ int WSAAPI DetourWSASendTo(
                 }
             }
 
-            uint16_t dstPort = 0;
-            const bool hasPort = TryGetSockaddrPort(dst, &dstPort);
-            const bool allowUdp = dst && (IsSockaddrLoopback(dst) || (hasPort && dstPort == 53));
-            if (!allowUdp) {
-                const int err = WSAEACCES;
-                if (lpNumberOfBytesSent) {
-                    *lpNumberOfBytesSent = 0;
+            // udp_mode=block：保持旧行为
+            if (config.rules.udp_mode == "block") {
+                uint16_t dstPort = 0;
+                const bool hasPort = TryGetSockaddrPort(dst, &dstPort);
+                const bool allowUdp = dst && (IsSockaddrLoopback(dst) || (hasPort && dstPort == 53));
+                if (!allowUdp) {
+                    const int err = WSAEACCES;
+                    if (lpNumberOfBytesSent) {
+                        *lpNumberOfBytesSent = 0;
+                    }
+                    if (ShouldLogUdpBlock()) {
+                        const std::string dstStr = dst ? SockaddrToString(dst) : std::string("(未知)");
+                        Core::Logger::Warn("WSASendTo: 已阻止 UDP 发送(策略: udp_mode=block, 说明: 禁用 QUIC/HTTP3), sock=" + std::to_string((unsigned long long)s) +
+                                           ", dst=" + dstStr +
+                                           (hasPort ? (", port=" + std::to_string(dstPort)) : std::string("")) +
+                                           ", WSA错误码=" + std::to_string(err));
+                    }
+                    WSASetLastError(err);
+                    return SOCKET_ERROR;
                 }
-                if (ShouldLogUdpBlock()) {
-                    const std::string dstStr = dst ? SockaddrToString(dst) : std::string("(未知)");
-                    Core::Logger::Warn("WSASendTo: 已阻止 UDP 发送(策略: udp_mode=block, 说明: 禁用 QUIC/HTTP3), sock=" + std::to_string((unsigned long long)s) +
-                                       ", dst=" + dstStr +
-                                       (hasPort ? (", port=" + std::to_string(dstPort)) : std::string("")) +
-                                       ", WSA错误码=" + std::to_string(err));
+                return fpWSASendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpTo, iToLen, lpOverlapped, lpCompletionRoutine);
+            }
+
+            // udp_mode=proxy：封装为 SOCKS5 UDP 报文并发给 relay
+            if (config.rules.udp_mode == "proxy") {
+                std::string host;
+                uint16_t port = 0;
+                int family = AF_INET;
+                if (dst) {
+                    family = (int)dst->sa_family;
+                    if (!ResolveOriginalTarget(dst, &host, &port) || host.empty() || port == 0) {
+                        WSASetLastError(WSAEINVAL);
+                        return SOCKET_ERROR;
+                    }
+                    if (!ShouldProxyUdpByRule(dst, host, port)) {
+                        return fpWSASendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpTo, iToLen, lpOverlapped, lpCompletionRoutine);
+                    }
+                } else {
+                    if (!TryGetUdpProxyDefaultTarget(s, &host, &port) || host.empty() || port == 0) {
+                        WSASetLastError(WSAEDESTADDRREQ);
+                        return SOCKET_ERROR;
+                    }
+                    sockaddr_storage local{};
+                    int localLen = (int)sizeof(local);
+                    if (getsockname(s, (sockaddr*)&local, &localLen) == 0) {
+                        family = (int)local.ss_family;
+                    }
                 }
-                WSASetLastError(err);
-                return SOCKET_ERROR;
+
+                if (!EnsureUdpProxyReady(s, family, host, port, true)) {
+                    if (config.rules.udp_fallback == "direct" && dst) {
+                        if (ShouldLogUdpProxyFail()) {
+                            const int err = WSAGetLastError();
+                            Core::Logger::Warn("WSASendTo: UDP 代理失败，回退为 direct, sock=" + std::to_string((unsigned long long)s) +
+                                               ", target=" + host + ":" + std::to_string(port) +
+                                               ", WSA错误码=" + std::to_string(err));
+                        }
+                        CleanupUdpProxyContext(s);
+                        return fpWSASendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpTo, iToLen, lpOverlapped, lpCompletionRoutine);
+                    }
+                    return SOCKET_ERROR;
+                }
+                UpdateUdpProxyDefaultTarget(s, host, port);
+                RememberSocketTarget(s, host, port);
+
+                std::vector<uint8_t> header;
+                if (!Network::Socks5Udp::Wrap(host, port, nullptr, 0, &header)) {
+                    if (config.rules.udp_fallback == "direct" && dst) {
+                        if (ShouldLogUdpProxyFail()) {
+                            Core::Logger::Warn("WSASendTo: UDP 封装失败，回退为 direct, sock=" + std::to_string((unsigned long long)s) +
+                                               ", target=" + host + ":" + std::to_string(port));
+                        }
+                        CleanupUdpProxyContext(s);
+                        return fpWSASendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpTo, iToLen, lpOverlapped, lpCompletionRoutine);
+                    }
+                    WSASetLastError(WSAECONNREFUSED);
+                    return SOCKET_ERROR;
+                }
+
+                const DWORD userBytes = (DWORD)SumWsabufBytes(lpBuffers, dwBufferCount);
+
+                if (!lpOverlapped) {
+                    // 同步：拼接 WSABUF 头 + 用户 payload
+                    std::vector<WSABUF> bufs;
+                    bufs.reserve((size_t)dwBufferCount + 1);
+                    WSABUF h{};
+                    h.buf = (CHAR*)header.data();
+                    h.len = (ULONG)header.size();
+                    bufs.push_back(h);
+                    for (DWORD i = 0; i < dwBufferCount; ++i) {
+                        bufs.push_back(lpBuffers[i]);
+                    }
+                    int rc = fpWSASend ? fpWSASend(s, bufs.data(), (DWORD)bufs.size(), lpNumberOfBytesSent, dwFlags, NULL, NULL)
+                                       : fpWSASendTo(s, bufs.data(), (DWORD)bufs.size(), lpNumberOfBytesSent, dwFlags, NULL, 0, NULL, NULL);
+                    if (rc == 0 && lpNumberOfBytesSent) {
+                        *lpNumberOfBytesSent = userBytes;
+                    }
+                    return rc;
+                }
+
+                // Overlapped：保存上下文，等待完成时修正 bytesTransferred
+                auto ctx = std::make_shared<UdpOverlappedSendCtx>();
+                ctx->sock = s;
+                ctx->header = std::move(header);
+                ctx->userBytes = userBytes;
+                ctx->userBytesPtr = lpNumberOfBytesSent;
+                ctx->userCompletion = lpCompletionRoutine;
+
+                ctx->bufs.reserve((size_t)dwBufferCount + 1);
+                WSABUF h{};
+                h.buf = (CHAR*)ctx->header.data();
+                h.len = (ULONG)ctx->header.size();
+                ctx->bufs.push_back(h);
+                for (DWORD i = 0; i < dwBufferCount; ++i) {
+                    ctx->bufs.push_back(lpBuffers[i]);
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(g_udpOvlMtx);
+                    g_udpOvlSend[lpOverlapped] = ctx;
+                }
+
+                // 走 WSASend（socket 已 connect 到 relay）
+                const auto cb = lpCompletionRoutine ? UdpProxyCompletionRoutine : nullptr;
+                int rc = fpWSASend ? fpWSASend(s, ctx->bufs.data(), (DWORD)ctx->bufs.size(),
+                                               lpNumberOfBytesSent, dwFlags, lpOverlapped, cb)
+                                   : fpWSASendTo(s, ctx->bufs.data(), (DWORD)ctx->bufs.size(),
+                                                 lpNumberOfBytesSent, dwFlags, NULL, 0, lpOverlapped, cb);
+
+                if (rc == SOCKET_ERROR) {
+                    int err = WSAGetLastError();
+                    if (err != WSA_IO_PENDING) {
+                        DropUdpOverlappedContext(lpOverlapped);
+                    } else {
+                        // IO_PENDING：立即把 lpNumberOfBytesSent 置 0，符合调用方预期
+                        if (lpNumberOfBytesSent) *lpNumberOfBytesSent = 0;
+                    }
+                    WSASetLastError(err);
+                    return SOCKET_ERROR;
+                }
+
+                // 立即完成：修正 bytesSent（completionRoutine 可能稍后才触发）
+                if (lpNumberOfBytesSent) *lpNumberOfBytesSent = userBytes;
+                return rc;
             }
         }
     }
@@ -2450,6 +3965,16 @@ namespace Hooks {
                              (LPVOID)DetourWSASendTo, (LPVOID*)&fpWSASendTo) != MH_OK) {
             Core::Logger::Error("Hook WSASendTo 失败");
         }
+
+        // Hook recvfrom / WSARecvFrom（UDP 代理：解封装 SOCKS5 UDP Reply）
+        if (MH_CreateHookApi(L"ws2_32.dll", "recvfrom",
+                             (LPVOID)DetourRecvFrom, (LPVOID*)&fpRecvFrom) != MH_OK) {
+            Core::Logger::Error("Hook recvfrom 失败");
+        }
+        if (MH_CreateHookApi(L"ws2_32.dll", "WSARecvFrom",
+                             (LPVOID)DetourWSARecvFrom, (LPVOID*)&fpWSARecvFrom) != MH_OK) {
+            Core::Logger::Error("Hook WSARecvFrom 失败");
+        }
         
         if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
             Core::Logger::Error("启用 Hooks 失败");
@@ -2463,6 +3988,26 @@ namespace Hooks {
             // 清理未完成的 ConnectEx 上下文，避免卸载后残留
             std::lock_guard<std::mutex> lock(g_connectExMtx);
             g_connectExPending.clear();
+        }
+        {
+            // 清理 UDP 代理上下文：关闭 SOCKS5 UDP Associate 控制连接
+            std::unordered_map<SOCKET, UdpProxyContext> tmp;
+            {
+                std::lock_guard<std::mutex> lock(g_udpProxyMtx);
+                tmp.swap(g_udpProxy);
+            }
+            for (auto& kv : tmp) {
+                if (kv.second.controlSock != INVALID_SOCKET) {
+                    if (fpCloseSocket) fpCloseSocket(kv.second.controlSock);
+                    else closesocket(kv.second.controlSock);
+                }
+            }
+        }
+        {
+            // 清理 UDP Overlapped 上下文，避免卸载后泄漏
+            std::lock_guard<std::mutex> lock(g_udpOvlMtx);
+            g_udpOvlSend.clear();
+            g_udpOvlRecv.clear();
         }
         {
             // 清理 socket -> 原始目标映射，避免卸载后残留
