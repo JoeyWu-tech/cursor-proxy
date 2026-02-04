@@ -639,14 +639,30 @@
                     <span class="font-mono">proxy_rules.udp_mode</span>
                     <span class="tip">
                       <i class="fa-solid fa-circle-info"></i>
-                      <span class="tip-pop">UDP 策略：block（默认，阻断 UDP 强制回退 TCP，避免 QUIC/HTTP3 绕过代理）/ direct（直连）。</span>
+                      <span class="tip-pop">UDP 策略：block（默认，阻断强制回退 TCP）/ direct（直连）/ proxy（走代理，需 SOCKS5 UDP Associate）。</span>
                     </span>
                   </label>
                   <select id="udp_mode" class="field-input" data-bind="proxy_rules.udp_mode">
                     <option value="block">block</option>
                     <option value="direct">direct</option>
+                    <option value="proxy">proxy</option>
                   </select>
                   <div class="field-error" data-error-for="proxy_rules.udp_mode"></div>
+                </div>
+
+                <div class="field">
+                  <label class="field-label" for="udp_fallback">
+                    <span class="font-mono">proxy_rules.udp_fallback</span>
+                    <span class="tip">
+                      <i class="fa-solid fa-circle-info"></i>
+                      <span class="tip-pop">UDP 代理失败降级策略（仅 udp_mode=proxy 时生效）：block（失败即阻断，默认）/ direct（失败回退直连）。</span>
+                    </span>
+                  </label>
+                  <select id="udp_fallback" class="field-input" data-bind="proxy_rules.udp_fallback">
+                    <option value="block">block</option>
+                    <option value="direct">direct</option>
+                  </select>
+                  <div class="field-error" data-error-for="proxy_rules.udp_fallback"></div>
                 </div>
               </fieldset>
             </div>
@@ -1405,6 +1421,7 @@
             dns_mode: "direct",
             ipv6_mode: "proxy",
             udp_mode: "block",
+            udp_fallback: "block",
             routing: {
               enabled: true,
               priority_mode: "order",
@@ -1502,7 +1519,8 @@
             : deepClone(base.proxy_rules.allowed_ports);
           out.proxy_rules.dns_mode = normalizeEnum(pr.dns_mode, ["direct", "proxy"], base.proxy_rules.dns_mode);
           out.proxy_rules.ipv6_mode = normalizeEnum(pr.ipv6_mode, ["proxy", "direct", "block"], base.proxy_rules.ipv6_mode);
-          out.proxy_rules.udp_mode = normalizeEnum(pr.udp_mode, ["block", "direct"], base.proxy_rules.udp_mode);
+          out.proxy_rules.udp_mode = normalizeEnum(pr.udp_mode, ["block", "direct", "proxy"], base.proxy_rules.udp_mode);
+          out.proxy_rules.udp_fallback = normalizeEnum(pr.udp_fallback, ["block", "direct"], base.proxy_rules.udp_fallback);
 
           const rt = pr.routing && typeof pr.routing === "object" ? pr.routing : {};
           out.proxy_rules.routing.enabled = normalizeBool(rt.enabled, base.proxy_rules.routing.enabled);
@@ -1614,6 +1632,7 @@
           outPr.dns_mode = state.form.proxy_rules.dns_mode;
           outPr.ipv6_mode = state.form.proxy_rules.ipv6_mode;
           outPr.udp_mode = state.form.proxy_rules.udp_mode;
+          outPr.udp_fallback = state.form.proxy_rules.udp_fallback;
 
           const outRt = ensureObjIn(outPr, "routing");
           outRt.enabled = !!state.form.proxy_rules.routing.enabled;
@@ -1700,7 +1719,8 @@
           // enums
           if (!["direct", "proxy"].includes(state.form.proxy_rules.dns_mode)) err("proxy_rules.dns_mode", "必须为 direct/proxy");
           if (!["proxy", "direct", "block"].includes(state.form.proxy_rules.ipv6_mode)) err("proxy_rules.ipv6_mode", "必须为 proxy/direct/block");
-          if (!["block", "direct"].includes(state.form.proxy_rules.udp_mode)) err("proxy_rules.udp_mode", "必须为 block/direct");
+          if (!["block", "direct", "proxy"].includes(state.form.proxy_rules.udp_mode)) err("proxy_rules.udp_mode", "必须为 block/direct/proxy");
+          if (!["block", "direct"].includes(state.form.proxy_rules.udp_fallback)) err("proxy_rules.udp_fallback", "必须为 block/direct");
 
           // routing enums
           if (!["order", "number"].includes(state.form.proxy_rules.routing.priority_mode)) err("proxy_rules.routing.priority_mode", "必须为 order/number");
