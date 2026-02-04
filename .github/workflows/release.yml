@@ -89,6 +89,18 @@ jobs:
         $zipName = "antigravity-proxy-${{ steps.prepare_version.outputs.release_tag }}-win-${{ matrix.arch }}.zip"
         $zipPath = Join-Path $env:RUNNER_TEMP $zipName
         if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
+        
+        # 兜底：确保配置工具已进入 output（build.ps1 已复制，这里再校验一次避免遗漏）
+        $configWebSrc = Join-Path $env:GITHUB_WORKSPACE "resources\config-web\index.html"
+        $configWebDst = Join-Path $env:GITHUB_WORKSPACE "output\config-web.html"
+        if (Test-Path $configWebSrc) {
+          Copy-Item $configWebSrc -Destination $configWebDst -Force
+          Write-Host "已复制配置工具到 output: $configWebDst"
+        } else {
+          Write-Error "配置工具源文件不存在: $configWebSrc"
+          exit 1
+        }
+
         Compress-Archive -Path "output/*" -DestinationPath $zipPath -Force
         "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 

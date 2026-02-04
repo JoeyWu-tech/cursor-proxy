@@ -500,6 +500,19 @@ $usageDoc | Out-File -FilePath $usagePath -Encoding UTF8
 Write-Success "使用说明已生成: $usagePath"
 
 # ============================================================
+# 步骤 10: 复制配置工具
+# ============================================================
+
+Write-Step "复制配置工具..."
+$configWebSrc = Join-Path $PSScriptRoot "resources\config-web\index.html"
+if (Test-Path $configWebSrc) {
+    Copy-Item $configWebSrc -Destination (Join-Path $OutputDir "config-web.html") -Force
+    Write-Success "配置工具已复制到 output 目录"
+} else {
+    Write-Warning "配置工具源文件不存在: $configWebSrc"
+}
+
+# ============================================================
 # 完成
 # ============================================================
 
