@@ -24,3 +24,4 @@ cmake_install.cmake
 Thumbs.db
 Desktop.ini
 .DS_Store
+microsoft/
