@@ -1,0 +1,23 @@
+{
+    "proxy": {
+        "host": "127.0.0.1",
+        "port": 7890,
+        "type": "socks5"
+    },
+    "fake_ip": {
+        "enabled": true,
+        "cidr": "198.18.0.0/15"
+    },
+    "timeout": {
+        "connect": 30000,
+        "send": 30000,
+        "recv": 30000
+    },
+    "child_injection": true,
+    "target_processes": ["Cursor.exe"],
+    "proxy_rules": {
+        "allowed_ports": [80, 443],
+        "dns_mode": "direct",
+        "ipv6_mode": "proxy"
+    }
+}

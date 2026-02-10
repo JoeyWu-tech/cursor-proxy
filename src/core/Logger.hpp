@@ -71,7 +71,7 @@ namespace Core {
             static std::once_flag s_once;
             std::call_once(s_once, []() {
                 // 使用 Local\ 命名空间：对普通桌面进程权限更稳
-                s_mutex = CreateMutexA(NULL, FALSE, "Local\\AntigravityProxy_LogFileMutex");
+                s_mutex = CreateMutexA(NULL, FALSE, "Local\\CursorProxy_LogFileMutex");
             });
             return s_mutex;
         }
@@ -128,7 +128,7 @@ namespace Core {
         }
 
         // 获取日志目录路径，首次调用时初始化
-        // 优先级：DLL目录/logs/ → 系统TEMP目录/antigravity-proxy-logs/
+        // 优先级：DLL目录/logs/ → 系统TEMP目录/cursor-proxy-logs/
         static std::string GetLogDirectory() {
             static std::string s_logDir;
             static bool s_initialized = false;
@@ -146,7 +146,7 @@ namespace Core {
                 // 回退到系统 TEMP 目录
                 std::string tempDir = GetSystemTempDirectory();
                 if (!tempDir.empty()) {
-                    std::string tempLogs = tempDir + "\\antigravity-proxy-logs";
+                    std::string tempLogs = tempDir + "\\cursor-proxy-logs";
                     if (EnsureLogDirectory(tempLogs)) {
                         s_logDir = tempLogs;
                     }

@@ -26,7 +26,7 @@
 
 cmake_minimum_required(VERSION 3.0...3.5)
 
-project(antigravity-proxy LANGUAGES C CXX)
+project(cursor-proxy LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
