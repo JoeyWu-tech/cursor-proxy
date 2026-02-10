@@ -1,44 +1,94 @@
-name: Build
+name: Build and Release
 
 on:
   push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+    tags:
+      - 'v*'  # 推送 v 开头的 tag 时触发（如 v1.0.0）
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: windows-latest
-    
     strategy:
       matrix:
         arch: [x64, x86]
 
     steps:
-    - name: 检出仓库
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    # 从 build.ps1 读取版本号，确保产物命名与脚本一致
-    - name: 读取版本号
-      shell: pwsh
-      run: |
-        $match = Select-String -Path .\build.ps1 -Pattern '^\s*\$Version\s*=\s*\"([^\"]+)\"'
-        if (-not $match) {
-          Write-Error "未在 build.ps1 中找到版本号"
-          exit 1
-        }
-        $version = $match.Matches[0].Groups[1].Value
-        "BUILD_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
 
-    # 使用 build.ps1 统一编译逻辑，保持与本地流程一致
-    - name: 执行编译脚本（Release，先清理）
-      shell: pwsh
-      run: .\build.ps1 -Clean -Config Release -Arch ${{ matrix.arch }}
+      - name: Download nlohmann/json
+        run: |
+          $nlohmannDir = "include\nlohmann"
+          if (-not (Test-Path "$nlohmannDir\json.hpp")) {
+            New-Item -ItemType Directory -Path $nlohmannDir -Force | Out-Null
+            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/nlohmann/json/develop/single_include/nlohmann/json.hpp" -OutFile "$nlohmannDir\json.hpp"
+          }
+        shell: pwsh
 
-    # 上传 output 目录的产物，便于下载验证
-    - name: 上传构建产物
-      uses: actions/upload-artifact@v4
-      with:
-        name: antigravity-proxy-v${{ env.BUILD_VERSION }}-win-${{ matrix.arch }}
-        path: output/**
-        if-no-files-found: error
+      - name: Configure CMake (${{ matrix.arch }})
+        run: |
+          $cmakeArch = if ("${{ matrix.arch }}" -eq "x64") { "x64" } else { "Win32" }
+          cmake -B build-${{ matrix.arch }} -G "Visual Studio 17 2022" -A $cmakeArch -DSTATIC_RUNTIME=ON
+        shell: pwsh
+
+      - name: Build
+        run: cmake --build build-${{ matrix.arch }} --config Release
+
+      - name: Prepare release files
+        run: |
+          $outDir = "release-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+          # 查找编译产物
+          $dll = Get-ChildItem -Path "build-${{ matrix.arch }}" -Recurse -Filter "version.dll" | Select-Object -First 1
+          if ($dll) {
+            Copy-Item $dll.FullName -Destination "$outDir\version.dll"
+          }
+          Copy-Item "config.json" -Destination "$outDir\config.json"
+          # 打包为 zip
+          Compress-Archive -Path "$outDir\*" -DestinationPath "cursor-proxy-${{ matrix.arch }}.zip"
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cursor-proxy-${{ matrix.arch }}
+          path: cursor-proxy-${{ matrix.arch }}.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: |
+            ## Cursor-Proxy ${{ github.ref_name }}
+
+            专为 Cursor 编辑器打造的代理注入工具，基于 [antigravity-proxy](https://github.com/yuaotian/antigravity-proxy) 修改。
+
+            ### 使用方法
+            1. 下载对应架构的 zip（一般选 **x64**）
+            2. 解压得到 `version.dll` 和 `config.json`
+            3. 将两个文件放到 `Cursor.exe` 同级目录
+            4. 编辑 `config.json` 中的代理端口
+            5. 启动 Cursor
+
+            详见 [README](https://github.com/${{ github.repository }}/blob/main/README.md)
+          files: |
+            artifacts/cursor-proxy-x64/cursor-proxy-x64.zip
+            artifacts/cursor-proxy-x86/cursor-proxy-x86.zip
+          draft: false
+          prerelease: false

@@ -31,7 +31,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
         // ============================================================================
         VersionProxy::Initialize();  // 空操作，保持接口兼容
         
-        Core::Logger::Info("Antigravity-Proxy DLL 已加载 (模拟 version.dll)");
+        Core::Logger::Info("Cursor-Proxy DLL 已加载 (模拟 version.dll)");
         
         // 加载配置
         const bool loaded = Core::Config::Instance().Load("config.json");
@@ -50,7 +50,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     case DLL_PROCESS_DETACH: {
         Hooks::Uninstall();
         VersionProxy::Uninitialize();
-        Core::Logger::Info("Antigravity-Proxy DLL 已卸载");
+        Core::Logger::Info("Cursor-Proxy DLL 已卸载");
         break;
     }
     }

@@ -34,8 +34,8 @@ namespace Network {
         static constexpr uint32_t kSharedMagic = 0x4650494D; // "FIPM"
         static constexpr uint32_t kSharedCapacity = 4096;
         static constexpr size_t kSharedDomainMax = 255;
-        static constexpr const char* kSharedMapName = "Local\\AntigravityProxy_FakeIP_Map";
-        static constexpr const char* kSharedMutexName = "Local\\AntigravityProxy_FakeIP_Mutex";
+        static constexpr const char* kSharedMapName = "Local\\CursorProxy_FakeIP_Map";
+        static constexpr const char* kSharedMutexName = "Local\\CursorProxy_FakeIP_Mutex";
 
         struct SharedEntry {
             uint32_t ip;       // host order

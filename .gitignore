@@ -1,55 +1,26 @@
-#OS junk files
-[Tt]humbs.db
-*.DS_Store
-
-#Visual Studio files
-*.[Oo]bj
-*.user
-*.aps
-*.pch
-*.vspscc
-*.vssscc
-*_i.c
-*_p.c
-*.ncb
-*.suo
-*.tlb
-*.tlh
-*.bak
-*.[Cc]ache
-*.ilk
-*.log
-*.sbr
-*.sdf
-*.opensdf
-*.unsuccessfulbuild
-ipch/
-obj/
-[Ll]ib
-[Bb]in
-[Dd]ebug*/
-[Rr]elease*/
-Ankh.NoLoad
-*.VC.db
-.vs/
-
-#GCC files
-*.o
-*.d
-*.res
-*.dll
-*.a
-
-#Visual Studio Code files
-.vscode/
-
-#输出文件
-output/
-log/
-
-*.zip
-*.7z
-
-build/
+# 构建目录
 build-x64/
 build-x86/
+build-tests/
+output/
+
+# Visual Studio
+*.vcxproj.user
+*.suo
+*.sdf
+*.opensdf
+.vs/
+x64/
+x86/
+Debug/
+Release/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
