@@ -54,37 +54,11 @@ C:\Users\<用户名>\AppData\Local\Programs\cursor\
 cd "$env:LOCALAPPDATA\Programs\cursor"
 ```
 
-### Step 4：修改配置
-
-编辑 `config.json`，根据你的代理软件调整端口和协议类型：
-
-```json
-{
-    "proxy": {
-        "host": "127.0.0.1",
-        "port": 7890,
-        "type": "socks5"
-    },
-    "timeout": {
-        "connect": 30000,
-        "send": 30000,
-        "recv": 30000
-    },
-    "target_processes": ["Cursor.exe"]
-}
-```
-
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `proxy.port` | 代理端口（Clash 一般 7890 或 7897） | `7890` |
-| `proxy.type` | 代理协议：`socks5` 或 `http` | `socks5` |
-| `timeout.*` | 超时时间（毫秒），建议大一些防止 MCP 等长耗时操作断流 | `30000` |
-
-### Step 5：启动 Cursor
+### Step 4：启动 Cursor
 
 直接启动 Cursor 即可。DLL 会自动加载并劫持网络流量走代理。
 
-### Step 6（推荐）：开启 HTTP/2
+### Step 5（推荐）：开启 HTTP/2
 
 在 Cursor 设置中（Settings → Network），将 HTTP Compatibility Mode 切换为 **HTTP/2**。
 
